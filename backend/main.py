@@ -1,23 +1,41 @@
 import json
 import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
-from backend import ingest, query
+from backend import db, ingest, query
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
 )
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="DocRAG")
-
 FRONTEND = Path(__file__).parent.parent / "frontend" / "index.html"
 
 _state: dict = {"doc_id": None, "chunk_count": 0}
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    try:
+        pool = await db.get_pool()
+        doc = await db.get_latest_doc(pool)
+        if doc:
+            _state["doc_id"] = doc["doc_id"]
+            _state["chunk_count"] = doc["chunk_count"]
+            logger.info(
+                "Restored doc_id=%s (%d chunks)", doc["doc_id"], doc["chunk_count"]
+            )
+    except Exception:
+        logger.warning("Could not restore document state from DB", exc_info=True)
+    yield
+
+
+app = FastAPI(title="DocRAG", lifespan=lifespan)
 
 
 @app.get("/")

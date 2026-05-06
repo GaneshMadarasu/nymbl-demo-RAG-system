@@ -87,3 +87,14 @@ async def get_doc_info(pool: asyncpg.Pool, doc_id: str) -> dict | None:
     if row and row["chunk_count"] > 0:
         return {"chunk_count": row["chunk_count"], "embedding_dim": 768}
     return None
+
+
+async def get_latest_doc(pool: asyncpg.Pool) -> dict | None:
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT doc_id, COUNT(*) AS chunk_count FROM chunks "
+            "GROUP BY doc_id ORDER BY MAX(created_at) DESC LIMIT 1"
+        )
+    if row and row["chunk_count"] > 0:
+        return {"doc_id": row["doc_id"], "chunk_count": row["chunk_count"]}
+    return None
