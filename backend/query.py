@@ -23,16 +23,41 @@ SYSTEM_PROMPT = (
 )
 
 
-async def _embed_query(text: str) -> list[float]:
-    r = await _client.aio.models.embed_content(
-        model=_EMBED_MODEL,
-        contents=text,
-        config=types.EmbedContentConfig(
-            output_dimensionality=_EMBED_DIM,
-            task_type="RETRIEVAL_QUERY",
-        ),
+_MAX_RETRIES = 6
+_RETRY_BASE = 2.0
+
+
+def _is_retryable(exc: Exception) -> bool:
+    msg = str(exc)
+    return (
+        "429" in msg
+        or "503" in msg
+        or "ResourceExhausted" in type(exc).__name__
+        or "ServiceUnavailable" in type(exc).__name__
+        or "timed out" in msg.lower()
+        or "UNAVAILABLE" in msg
     )
-    return list(r.embeddings[0].values)
+
+
+async def _embed_query(text: str) -> list[float]:
+    for attempt in range(_MAX_RETRIES):
+        try:
+            r = await _client.aio.models.embed_content(
+                model=_EMBED_MODEL,
+                contents=text,
+                config=types.EmbedContentConfig(
+                    output_dimensionality=_EMBED_DIM,
+                    task_type="RETRIEVAL_QUERY",
+                ),
+            )
+            return list(r.embeddings[0].values)
+        except Exception as exc:
+            if attempt < _MAX_RETRIES - 1 and _is_retryable(exc):
+                wait = _RETRY_BASE**attempt
+                logger.warning("Query embed failed (%s); retrying in %.0fs", exc, wait)
+                await asyncio.sleep(wait)
+                continue
+            raise
 
 
 def build_prompt(question: str, chunks: list[dict]) -> str:

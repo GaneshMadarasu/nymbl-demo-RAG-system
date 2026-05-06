@@ -27,22 +27,41 @@ def _doc_id(pdf_bytes: bytes) -> str:
     return hashlib.sha256(pdf_bytes).hexdigest()[:16]
 
 
+def _is_retryable(exc: Exception) -> bool:
+    msg = str(exc)
+    return (
+        "429" in msg
+        or "503" in msg
+        or "ResourceExhausted" in type(exc).__name__
+        or "ServiceUnavailable" in type(exc).__name__
+        or "timed out" in msg.lower()
+        or "UNAVAILABLE" in msg
+    )
+
+
 async def _extract_text(pdf_bytes: bytes) -> str:
     t0 = time.monotonic()
-    response = await _client.aio.models.generate_content(
-        model=_EXTRACT_MODEL,
-        contents=[
-            types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf"),
-            "Extract all text from this PDF as clean plaintext. Preserve paragraph structure. Remove page numbers, headers, and footers.",
-        ],
-    )
-    text = response.text or ""
-    logger.info("Gemini extracted %d chars in %.2fs", len(text), time.monotonic() - t0)
-    return text
-
-
-def _is_rate_limit(exc: Exception) -> bool:
-    return "429" in str(exc) or "ResourceExhausted" in type(exc).__name__
+    for attempt in range(_MAX_RETRIES):
+        try:
+            response = await _client.aio.models.generate_content(
+                model=_EXTRACT_MODEL,
+                contents=[
+                    types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf"),
+                    "Extract all text from this PDF as clean plaintext. Preserve paragraph structure. Remove page numbers, headers, and footers.",
+                ],
+            )
+            text = response.text or ""
+            logger.info(
+                "Gemini extracted %d chars in %.2fs", len(text), time.monotonic() - t0
+            )
+            return text
+        except Exception as exc:
+            if attempt < _MAX_RETRIES - 1 and _is_retryable(exc):
+                wait = _RETRY_BASE**attempt
+                logger.warning("Extraction failed (%s); retrying in %.0fs", exc, wait)
+                await asyncio.sleep(wait)
+                continue
+            raise
 
 
 async def _embed_one(text: str) -> list[float]:
@@ -58,9 +77,9 @@ async def _embed_one(text: str) -> list[float]:
             )
             return list(r.embeddings[0].values)
         except Exception as exc:
-            if attempt < _MAX_RETRIES - 1 and _is_rate_limit(exc):
+            if attempt < _MAX_RETRIES - 1 and _is_retryable(exc):
                 wait = _RETRY_BASE**attempt
-                logger.warning("Embedding rate-limited; retrying in %.0fs", wait)
+                logger.warning("Embedding failed (%s); retrying in %.0fs", exc, wait)
                 await asyncio.sleep(wait)
                 continue
             raise
