@@ -6,9 +6,10 @@ Single-document RAG system: upload a PDF, ask questions, get grounded answers wi
 
 | Layer | Technology |
 |-------|-----------|
-| PDF extraction | Gemini 1.5 Flash |
-| Embeddings | `gemini-embedding-004` (768-dim) |
-| Answering | Gemini 1.5 Flash (streamed) |
+| PDF extraction | PyMuPDF (`fitz`) |
+| Embeddings | `BAAI/bge-base-en-v1.5` via fastembed (768-dim, local ONNX) |
+| Chunking | tiktoken-aware sentence-boundary splitter |
+| Answering | Gemini 2.5 Flash (streamed) |
 | Vector store | Postgres 16 + pgvector (HNSW) |
 | Backend | FastAPI + asyncpg |
 | Frontend | Single-file HTML/CSS/JS |
@@ -69,8 +70,17 @@ pytest -v
 
 ## Design decisions
 
-- **Gemini for extraction**: handles complex PDF layouts including images without local dependencies
-- **`gemini-embedding-004`**: 768-dim embeddings, same provider as answering — consistent similarity space
-- **pgvector HNSW index**: fast approximate nearest-neighbour search, good default for demo scale
-- **512-token chunks with 64-token overlap**: balances retrieval precision with context continuity
-- **Single HTML file**: no build tools or Node.js required — serves directly from FastAPI
+**PDF extraction — PyMuPDF instead of Gemini**
+The spec recommends using Gemini to extract plaintext from PDFs. We use PyMuPDF locally instead. For PDFs that are already structured text (not scanned images), a local parser produces equivalent quality with no API cost, no quota consumption, and no added latency. Gemini extraction makes sense when the input includes images or complex layouts; for text-native PDFs it's unnecessary overhead.
+
+**Embeddings — fastembed (`bge-base-en-v1.5`) instead of Gemini Embeddings**
+The spec recommends Gemini Embeddings. The Gemini embedding API has a hard daily quota on the free tier that is easy to exhaust during development and demos. `BAAI/bge-base-en-v1.5` runs locally via ONNX (no GPU required), requires no API key, produces the same 768-dim vectors, and is a well-benchmarked open model. This makes the demo reliably runnable without any quota management.
+
+**Chunking — token-aware sentence-boundary splitter**
+The spec asks for "reasonable chunk size with overlap." Rather than splitting on raw character count, we use `tiktoken` to measure token length accurately and split only at sentence boundaries. This keeps chunks semantically coherent and avoids splitting mid-sentence, which degrades retrieval quality.
+
+**pgvector HNSW index**
+Fast approximate nearest-neighbour search with good recall at demo scale. No separate vector database service needed — Postgres handles both structured data and vector search.
+
+**Single HTML file frontend**
+No build tools, no Node.js, no npm. The UI is served directly by FastAPI, so setup is a single `uvicorn` command.
