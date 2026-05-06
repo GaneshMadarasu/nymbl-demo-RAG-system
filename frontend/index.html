@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DocRAG</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #0a0a14; --sidebar: #11112b; --chat-bg: #0d0d22;
+      --bubble: #141432; --user-bubble: #1e1e42; --accent: #818cf8;
+      --border: #2a2a4a; --text: #e2e8f0; --muted: #64748b;
+      --input-bg: #11112b; --pill-bg: #1e3a5f; --radius: 8px;
+    }
+    html, body { height: 100%; background: var(--bg); color: var(--text); font-family: system-ui, -apple-system, sans-serif; font-size: 14px; }
+    .app { display: flex; height: 100vh; overflow: hidden; }
+    .sidebar { width: 300px; min-width: 260px; max-width: 340px; background: var(--sidebar); border-right: 1px solid var(--border); display: flex; flex-direction: column; gap: 16px; padding: 20px 16px; overflow-y: auto; }
+    .logo { font-size: 13px; font-weight: 700; letter-spacing: 2px; color: var(--accent); padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+    .upload-zone { border: 1.5px dashed var(--border); border-radius: var(--radius); padding: 28px 16px; text-align: center; color: var(--muted); cursor: pointer; transition: border-color .2s, background .2s; line-height: 1.6; }
+    .upload-zone:hover, .upload-zone.dragover { border-color: var(--accent); background: rgba(129,140,248,.05); color: var(--accent); }
+    .upload-zone .icon { font-size: 28px; display: block; margin-bottom: 8px; }
+    .progress-area { display: none; flex-direction: column; gap: 8px; }
+    .progress-area.visible { display: flex; }
+    .progress-bar { height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; }
+    .progress-fill { height: 100%; background: var(--accent); border-radius: 2px; width: 0%; transition: width .3s; }
+    .progress-msg { font-size: 12px; color: var(--muted); }
+    .doc-card { display: none; background: #1a1a3e; border-radius: var(--radius); padding: 12px; }
+    .doc-card.visible { display: block; }
+    .doc-card .label { font-size: 10px; letter-spacing: 1.5px; color: var(--accent); margin-bottom: 6px; }
+    .doc-card .doc-name { font-weight: 600; font-size: 13px; margin-bottom: 4px; word-break: break-all; }
+    .doc-card .doc-meta { font-size: 11px; color: var(--muted); margin-bottom: 10px; }
+    .clear-btn { font-size: 11px; color: var(--muted); background: none; border: 1px solid var(--border); border-radius: 4px; padding: 4px 10px; cursor: pointer; width: 100%; transition: color .2s, border-color .2s; }
+    .clear-btn:hover { color: #f87171; border-color: #f87171; }
+    .sidebar-error { font-size: 12px; color: #f87171; background: rgba(248,113,113,.1); border-radius: 4px; padding: 8px; display: none; }
+    .sidebar-error.visible { display: block; }
+    .chat { flex: 1; display: flex; flex-direction: column; background: var(--chat-bg); min-width: 0; }
+    .messages { flex: 1; overflow-y: auto; padding: 24px 20px; display: flex; flex-direction: column; gap: 16px; }
+    .messages:empty::after { content: "Upload a PDF, then ask a question."; color: var(--muted); font-size: 13px; display: block; text-align: center; margin-top: 20vh; }
+    .msg { display: flex; flex-direction: column; max-width: 75%; }
+    .msg.user { align-self: flex-end; align-items: flex-end; }
+    .msg.assistant { align-self: flex-start; align-items: flex-start; }
+    .bubble { padding: 10px 14px; border-radius: var(--radius); line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
+    .msg.user .bubble { background: var(--user-bubble); color: var(--muted); }
+    .msg.assistant .bubble { background: var(--bubble); border-left: 3px solid var(--accent); }
+    .citations { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+    .pill { background: var(--pill-bg); color: var(--accent); border-radius: 20px; padding: 2px 10px; font-size: 11px; cursor: pointer; position: relative; transition: background .2s; user-select: none; }
+    .pill:hover { background: #2a4a6f; }
+    .tooltip { display: none; position: absolute; bottom: calc(100% + 6px); left: 50%; transform: translateX(-50%); background: #1e1e42; border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; font-size: 11px; color: var(--text); line-height: 1.5; width: 280px; white-space: normal; z-index: 10; box-shadow: 0 8px 24px rgba(0,0,0,.5); }
+    .pill:hover .tooltip { display: block; }
+    .error-bubble { align-self: flex-start; background: rgba(248,113,113,.1); border-left: 3px solid #f87171; color: #f87171; padding: 10px 14px; border-radius: var(--radius); font-size: 13px; }
+    .input-bar { display: flex; gap: 8px; padding: 16px 20px; border-top: 1px solid var(--border); background: var(--chat-bg); }
+    .input-bar input { flex: 1; background: var(--input-bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 14px; color: var(--text); font-size: 14px; outline: none; transition: border-color .2s; }
+    .input-bar input:focus { border-color: var(--accent); }
+    .input-bar input::placeholder { color: var(--muted); }
+    .input-bar input:disabled { opacity: .5; cursor: not-allowed; }
+    .send-btn { background: var(--accent); color: #0a0a14; border: none; border-radius: var(--radius); padding: 10px 18px; font-size: 16px; font-weight: 700; cursor: pointer; transition: background .2s; flex-shrink: 0; }
+    .send-btn:hover:not(:disabled) { background: #a5b4fc; }
+    .send-btn:disabled { opacity: .4; cursor: not-allowed; }
+    .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .7s linear infinite; vertical-align: middle; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="logo">DOCRAG</div>
+    <div class="upload-zone" id="upload-zone">
+      <input type="file" id="file-input" accept=".pdf" hidden>
+      <span class="icon">📄</span>
+      <strong>Drop PDF here</strong><br>or click to upload
+    </div>
+    <div class="progress-area" id="progress-area">
+      <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+      <div class="progress-msg" id="progress-msg">Starting…</div>
+    </div>
+    <div class="doc-card" id="doc-card">
+      <div class="label">LOADED DOCUMENT</div>
+      <div class="doc-name" id="doc-name"></div>
+      <div class="doc-meta" id="doc-meta"></div>
+      <button class="clear-btn" id="clear-btn">Clear document</button>
+    </div>
+    <div class="sidebar-error" id="sidebar-error"></div>
+  </aside>
+  <main class="chat">
+    <div class="messages" id="messages"></div>
+    <div class="input-bar">
+      <input type="text" id="query-input" placeholder="Upload a PDF first" disabled>
+      <button class="send-btn" id="send-btn" disabled>→</button>
+    </div>
+  </main>
+</div>
+<script>
+  const $ = id => document.getElementById(id);
+  let currentDoc = null;
+  let queryActive = false;
+
+  async function readSSE(response, onEvent) {
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          const raw = line.slice(6).trim();
+          if (raw) { try { onEvent(JSON.parse(raw)); } catch (_) {} }
+        }
+      }
+    }
+  }
+
+  const uploadZone = $('upload-zone');
+  const fileInput = $('file-input');
+  uploadZone.addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', e => { if (e.target.files[0]) handleUpload(e.target.files[0]); });
+  uploadZone.addEventListener('dragover', e => { e.preventDefault(); uploadZone.classList.add('dragover'); });
+  uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('dragover'));
+  uploadZone.addEventListener('drop', e => {
+    e.preventDefault();
+    uploadZone.classList.remove('dragover');
+    const file = e.dataTransfer.files[0];
+    if (file && file.name.endsWith('.pdf')) handleUpload(file);
+    else showSidebarError('Please drop a PDF file.');
+  });
+
+  async function handleUpload(file) {
+    hideSidebarError();
+    showProgress(0, 'Starting…');
+    setUploadZoneVisible(false);
+    const formData = new FormData();
+    formData.append('file', file);
+    try {
+      const res = await fetch('/ingest', { method: 'POST', body: formData });
+      if (!res.ok) { const err = await res.json(); throw new Error(err.detail || 'Upload failed'); }
+      await readSSE(res, event => {
+        if (event.status === 'done') {
+          currentDoc = { name: file.name, chunkCount: event.chunk_count, docId: event.doc_id };
+          showDocCard(file.name, event.chunk_count);
+          hideProgress();
+          enableInput();
+        } else {
+          const pct = event.progress ? Math.round(event.progress * 100) : null;
+          showProgress(pct, event.message);
+        }
+      });
+    } catch (err) {
+      hideProgress();
+      setUploadZoneVisible(true);
+      showSidebarError(err.message);
+    }
+  }
+
+  const queryInput = $('query-input');
+  const sendBtn = $('send-btn');
+  sendBtn.addEventListener('click', sendQuery);
+  queryInput.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) sendQuery(); });
+
+  async function sendQuery() {
+    const q = queryInput.value.trim();
+    if (!q || queryActive || !currentDoc) return;
+    queryActive = true;
+    queryInput.disabled = true;
+    sendBtn.disabled = true;
+    queryInput.value = '';
+    appendUserMessage(q);
+    const assistantBubble = appendAssistantMessage();
+    let accumulated = '';
+    let sources = [];
+    try {
+      const res = await fetch('/query', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question: q }) });
+      if (!res.ok) { const err = await res.json(); throw new Error(err.detail || 'Query failed'); }
+      await readSSE(res, event => {
+        if (event.type === 'sources') { sources = event.chunks; }
+        else if (event.type === 'token') { accumulated += event.text; assistantBubble.textContent = accumulated; }
+        else if (event.type === 'done') { renderFinalAnswer(assistantBubble, accumulated, sources); }
+      });
+    } catch (err) {
+      assistantBubble.closest('.msg')?.remove();
+      appendErrorBubble(err.message);
+    } finally {
+      queryActive = false;
+      queryInput.disabled = false;
+      sendBtn.disabled = false;
+      queryInput.focus();
+      scrollToBottom();
+    }
+  }
+
+  function appendUserMessage(text) {
+    const msg = document.createElement('div'); msg.className = 'msg user';
+    const bubble = document.createElement('div'); bubble.className = 'bubble'; bubble.textContent = text;
+    msg.appendChild(bubble); $('messages').appendChild(msg); scrollToBottom(); return bubble;
+  }
+
+  function appendAssistantMessage() {
+    const msg = document.createElement('div'); msg.className = 'msg assistant';
+    const bubble = document.createElement('div'); bubble.className = 'bubble';
+    bubble.innerHTML = '<span class="spinner"></span>';
+    msg.appendChild(bubble); $('messages').appendChild(msg); scrollToBottom(); return bubble;
+  }
+
+  function renderFinalAnswer(bubble, text, chunks) {
+    const escaped = text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    const withPills = escaped.replace(/\[Chunk (\d+)\]/g, (_, n) => {
+      const chunk = chunks.find(c => c.chunk_index === parseInt(n));
+      const tipText = chunk ? chunk.text.replace(/"/g, '&quot;') : '';
+      return `<span class="pill">§ Chunk ${n}<span class="tooltip">${tipText}</span></span>`;
+    });
+    bubble.innerHTML = withPills;
+    if (chunks.length > 0) {
+      const cites = document.createElement('div'); cites.className = 'citations';
+      const seen = new Set();
+      chunks.forEach(c => {
+        if (seen.has(c.chunk_index)) return; seen.add(c.chunk_index);
+        const pill = document.createElement('span'); pill.className = 'pill';
+        pill.innerHTML = `§ Chunk ${c.chunk_index}<span class="tooltip">${escapeHtml(c.text)}</span>`;
+        cites.appendChild(pill);
+      });
+      bubble.closest('.msg').appendChild(cites);
+    }
+    scrollToBottom();
+  }
+
+  function appendErrorBubble(msg) {
+    const el = document.createElement('div'); el.className = 'error-bubble';
+    el.textContent = `Error: ${msg}`; $('messages').appendChild(el); scrollToBottom();
+  }
+
+  function scrollToBottom() { const m = $('messages'); m.scrollTop = m.scrollHeight; }
+  function escapeHtml(str) { return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+  function showProgress(pct, msg) { $('progress-area').classList.add('visible'); $('progress-msg').textContent = msg || ''; if (pct !== null) $('progress-fill').style.width = pct + '%'; }
+  function hideProgress() { $('progress-area').classList.remove('visible'); }
+  function setUploadZoneVisible(v) { uploadZone.style.display = v ? '' : 'none'; }
+  function showDocCard(name, count) { $('doc-name').textContent = name; $('doc-meta').textContent = `${count} chunks · 768-dim`; $('doc-card').classList.add('visible'); }
+  function showSidebarError(msg) { const el = $('sidebar-error'); el.textContent = msg; el.classList.add('visible'); }
+  function hideSidebarError() { $('sidebar-error').classList.remove('visible'); }
+  function enableInput() { queryInput.disabled = false; sendBtn.disabled = false; queryInput.placeholder = 'Ask a question…'; queryInput.focus(); }
+
+  $('clear-btn').addEventListener('click', () => {
+    currentDoc = null;
+    $('doc-card').classList.remove('visible');
+    setUploadZoneVisible(true);
+    hideSidebarError();
+    fileInput.value = '';
+    queryInput.disabled = true; sendBtn.disabled = true;
+    queryInput.placeholder = 'Upload a PDF first';
+    $('messages').innerHTML = '';
+  });
+
+  async function init() {
+    try {
+      const res = await fetch('/doc/info');
+      const info = await res.json();
+      if (info.loaded) {
+        currentDoc = { docId: info.doc_id, chunkCount: info.chunk_count };
+        showDocCard(info.doc_id, info.chunk_count);
+        setUploadZoneVisible(false);
+        enableInput();
+      }
+    } catch (_) {}
+  }
+  init();
+</script>
+</body>
+</html>
