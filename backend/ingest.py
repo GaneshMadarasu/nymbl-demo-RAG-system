@@ -13,12 +13,16 @@ from backend.config import settings
 
 logger = logging.getLogger(__name__)
 
-_client = genai.Client(api_key=settings.gemini_api_key)
+_client = genai.Client(
+    api_key=settings.gemini_api_key,
+    http_options={"timeout": 600_000},  # 10 min — large PDFs can be slow
+)
 
 _BATCH_SIZE = 20
 _GEN_MODEL = "gemini-2.5-flash"
 _EMBED_MODEL = "gemini-embedding-2"
 _EMBED_DIM = 768
+_KEEPALIVE_INTERVAL = 8.0  # seconds between keepalive events during extraction
 
 
 def _doc_id(pdf_bytes: bytes) -> str:
@@ -59,7 +63,17 @@ async def run_ingest(pdf_bytes: bytes) -> AsyncGenerator[dict, None]:
     doc_id = _doc_id(pdf_bytes)
 
     yield {"status": "extracting", "message": "Extracting text from PDF…"}
-    text = await _extract_text(pdf_bytes)
+    extract_task = asyncio.create_task(_extract_text(pdf_bytes))
+    while not extract_task.done():
+        try:
+            text = await asyncio.wait_for(
+                asyncio.shield(extract_task), timeout=_KEEPALIVE_INTERVAL
+            )
+            break
+        except asyncio.TimeoutError:
+            yield {"status": "extracting", "message": "Extracting text from PDF…"}
+    else:
+        text = await extract_task  # propagate any exception from the task
     logger.info("Extracted %d characters", len(text))
 
     yield {"status": "chunking", "message": "Splitting into chunks…"}
