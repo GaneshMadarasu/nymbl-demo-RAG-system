@@ -12,7 +12,9 @@ class _Settings:
     def __init__(self) -> None:
         self.gemini_api_key = os.getenv("GEMINI_API_KEY", "")
         self.database_url = os.getenv("DATABASE_URL", "")
-        missing = [k for k, v in vars(self).items() if not v]
+        missing = [
+            k for k in self.__class__.__annotations__ if not getattr(self, k, "")
+        ]
         if missing:
             print(
                 f"ERROR: missing required env vars: {', '.join(missing)}",
@@ -21,4 +23,5 @@ class _Settings:
             sys.exit(1)
 
 
+# Tests must set GEMINI_API_KEY and DATABASE_URL via os.environ before importing this module.
 settings = _Settings()
