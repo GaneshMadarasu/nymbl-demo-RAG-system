@@ -129,6 +129,10 @@
 
   async function handleUpload(file) {
     hideSidebarError();
+    currentDoc = null;
+    $('doc-card').classList.remove('visible');
+    queryInput.disabled = true; sendBtn.disabled = true;
+    queryInput.placeholder = 'Upload a PDF first';
     showProgress(0, 'Starting…');
     setUploadZoneVisible(false);
     const formData = new FormData();
