@@ -88,6 +88,15 @@ async def ingest_pdf(file: UploadFile = File(...)) -> StreamingResponse:
     return StreamingResponse(stream(), media_type="text/event-stream")
 
 
+@app.delete("/doc")
+async def clear_doc() -> dict:
+    pool = await db.get_pool()
+    await db.clear_all_chunks(pool)
+    _state["doc_id"] = None
+    _state["chunk_count"] = 0
+    return {"cleared": True}
+
+
 class QueryRequest(BaseModel):
     question: str
 

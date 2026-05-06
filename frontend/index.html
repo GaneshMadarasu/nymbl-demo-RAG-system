@@ -244,7 +244,8 @@
   function hideSidebarError() { $('sidebar-error').classList.remove('visible'); }
   function enableInput() { queryInput.disabled = false; sendBtn.disabled = false; queryInput.placeholder = 'Ask a question…'; queryInput.focus(); }
 
-  $('clear-btn').addEventListener('click', () => {
+  $('clear-btn').addEventListener('click', async () => {
+    await fetch('/doc', { method: 'DELETE' });
     currentDoc = null;
     $('doc-card').classList.remove('visible');
     setUploadZoneVisible(true);
