@@ -3,7 +3,9 @@ import hashlib
 import logging
 import time
 from collections.abc import AsyncGenerator
+from io import BytesIO
 
+import fitz  # pymupdf
 from google import genai
 from google.genai import types
 
@@ -15,7 +17,6 @@ logger = logging.getLogger(__name__)
 
 _client = genai.Client(api_key=settings.gemini_api_key)
 
-_EXTRACT_MODEL = "gemini-2.5-flash"
 _EMBED_MODEL = "gemini-embedding-2"
 _EMBED_DIM = 768
 _MAX_RETRIES = 6
@@ -26,30 +27,19 @@ def _doc_id(pdf_bytes: bytes) -> str:
     return hashlib.sha256(pdf_bytes).hexdigest()[:16]
 
 
-async def _extract_text(pdf_bytes: bytes) -> str:
+def _extract_text(pdf_bytes: bytes) -> str:
     t0 = time.monotonic()
-    for attempt in range(_MAX_RETRIES):
-        try:
-            response = await _client.aio.models.generate_content(
-                model=_EXTRACT_MODEL,
-                contents=[
-                    types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf"),
-                    "Extract all text from this PDF as clean plaintext. Preserve paragraph structure. Remove page numbers, headers, and footers.",
-                ],
-                config=types.GenerateContentConfig(max_output_tokens=65536),
-            )
-            text = response.text or ""
-            logger.info(
-                "Gemini extracted %d chars in %.2fs", len(text), time.monotonic() - t0
-            )
-            return text
-        except Exception as exc:
-            if attempt < _MAX_RETRIES - 1 and _is_retryable(exc):
-                wait = _RETRY_BASE**attempt
-                logger.warning("Extraction failed (%s); retrying in %.0fs", exc, wait)
-                await asyncio.sleep(wait)
-                continue
-            raise
+    doc = fitz.open(stream=BytesIO(pdf_bytes), filetype="pdf")
+    pages = [page.get_text() for page in doc]
+    doc.close()
+    text = "\n\n".join(p for p in pages if p.strip()).replace("\x00", "")
+    logger.info(
+        "PyMuPDF extracted %d chars from %d pages in %.2fs",
+        len(text),
+        len(pages),
+        time.monotonic() - t0,
+    )
+    return text
 
 
 def _is_retryable(exc: Exception) -> bool:
@@ -90,8 +80,8 @@ async def run_ingest(pdf_bytes: bytes) -> AsyncGenerator[dict, None]:
     doc_id = _doc_id(pdf_bytes)
     loop = asyncio.get_event_loop()
 
-    yield {"status": "extracting", "message": "Extracting text with Gemini…"}
-    text = await _extract_text(pdf_bytes)
+    yield {"status": "extracting", "message": "Extracting text from PDF…"}
+    text = await loop.run_in_executor(None, _extract_text, pdf_bytes)
 
     yield {"status": "chunking", "message": "Splitting into chunks…"}
     chunks = await loop.run_in_executor(None, chunk_text, text)

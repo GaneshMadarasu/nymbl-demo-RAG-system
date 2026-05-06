@@ -6,7 +6,7 @@ Single-document RAG system: upload a PDF, ask questions, get grounded answers wi
 
 | Layer | Technology |
 |-------|-----------|
-| PDF extraction | Gemini 2.5 Flash (65,536 token output limit) |
+| PDF extraction | PyMuPDF (`fitz`) |
 | Embeddings | `gemini-embedding-2` (768-dim) |
 | Chunking | tiktoken-aware sentence-boundary splitter |
 | Answering | Gemini 2.5 Flash (streamed) |
@@ -70,8 +70,8 @@ pytest -v
 
 ## Design decisions
 
-**Gemini for PDF extraction**
-Handles complex layouts, scanned pages, and embedded images that a local parser would miss. `max_output_tokens` is set to the model maximum (65,536) to avoid silent truncation on large documents.
+**PyMuPDF for PDF extraction**
+Gemini's generative extraction is bounded by its output token limit (65,536 tokens max), which silently truncates large documents — a 100-page PDF that should produce 100+ chunks comes back as 6. PyMuPDF extracts all text verbatim with no output limits, making it reliable for documents of any size. Gemini is still used for embeddings and answering.
 
 **`gemini-embedding-2` for embeddings**
 768-dim vectors, consistent similarity space with the same provider used for answering, and supports separate `RETRIEVAL_DOCUMENT` / `RETRIEVAL_QUERY` task types which improve retrieval accuracy.
