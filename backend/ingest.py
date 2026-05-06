@@ -27,18 +27,6 @@ def _doc_id(pdf_bytes: bytes) -> str:
     return hashlib.sha256(pdf_bytes).hexdigest()[:16]
 
 
-def _is_retryable(exc: Exception) -> bool:
-    msg = str(exc)
-    return (
-        "429" in msg
-        or "503" in msg
-        or "ResourceExhausted" in type(exc).__name__
-        or "ServiceUnavailable" in type(exc).__name__
-        or "timed out" in msg.lower()
-        or "UNAVAILABLE" in msg
-    )
-
-
 async def _extract_text(pdf_bytes: bytes) -> str:
     t0 = time.monotonic()
     for attempt in range(_MAX_RETRIES):
@@ -49,6 +37,7 @@ async def _extract_text(pdf_bytes: bytes) -> str:
                     types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf"),
                     "Extract all text from this PDF as clean plaintext. Preserve paragraph structure. Remove page numbers, headers, and footers.",
                 ],
+                config=types.GenerateContentConfig(max_output_tokens=65536),
             )
             text = response.text or ""
             logger.info(
@@ -62,6 +51,18 @@ async def _extract_text(pdf_bytes: bytes) -> str:
                 await asyncio.sleep(wait)
                 continue
             raise
+
+
+def _is_retryable(exc: Exception) -> bool:
+    msg = str(exc)
+    return (
+        "429" in msg
+        or "503" in msg
+        or "ResourceExhausted" in type(exc).__name__
+        or "ServiceUnavailable" in type(exc).__name__
+        or "timed out" in msg.lower()
+        or "UNAVAILABLE" in msg
+    )
 
 
 async def _embed_one(text: str) -> list[float]:
