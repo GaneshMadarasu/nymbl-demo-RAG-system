@@ -17,9 +17,11 @@ _EMBED_MODEL = "gemini-embedding-2"
 _EMBED_DIM = 768
 
 SYSTEM_PROMPT = (
-    "You are a document Q&A assistant. Answer ONLY using the provided context.\n"
+    "You are a document Q&A assistant. Answer using ONLY the provided context.\n"
+    "Give thorough, detailed answers — explain concepts fully, include relevant examples "
+    "or steps from the context, and expand on any related points the context covers.\n"
     "If the context doesn't contain enough information, respond with exactly: \"I don't know.\"\n"
-    "Cite sources as [Chunk N] inline."
+    "Cite sources as [Chunk N] inline throughout your answer."
 )
 
 
@@ -70,7 +72,7 @@ async def run_query(question: str, doc_id: str) -> AsyncGenerator[dict, None]:
 
     t0 = time.monotonic()
     query_emb = await _embed_query(question)
-    chunks = await db.search_chunks(pool, doc_id, query_emb, k=5)
+    chunks = await db.search_chunks(pool, doc_id, query_emb, k=8)
     logger.info(
         "Retrieval took %.2fs, got %d chunks", time.monotonic() - t0, len(chunks)
     )
