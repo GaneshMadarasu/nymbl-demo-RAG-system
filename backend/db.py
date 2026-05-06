@@ -1,6 +1,8 @@
+import asyncio
 import asyncpg
 
 _pool: asyncpg.Pool | None = None
+_pool_lock = asyncio.Lock()
 
 SCHEMA = """
 CREATE EXTENSION IF NOT EXISTS vector;
@@ -21,12 +23,17 @@ CREATE INDEX IF NOT EXISTS chunks_embedding_idx
 
 async def get_pool() -> asyncpg.Pool:
     global _pool
-    if _pool is None:
-        from backend.config import settings
+    async with _pool_lock:
+        if _pool is None:
+            from backend.config import settings
 
-        _pool = await asyncpg.create_pool(settings.database_url)
-        async with _pool.acquire() as conn:
-            await conn.execute(SCHEMA)
+            try:
+                _pool = await asyncpg.create_pool(settings.database_url)
+                async with _pool.acquire() as conn:
+                    await conn.execute(SCHEMA)
+            except Exception:
+                _pool = None
+                raise
     return _pool
 
 
