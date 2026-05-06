@@ -48,11 +48,15 @@ async def ingest_pdf(file: UploadFile = File(...)) -> StreamingResponse:
     pdf_bytes = await file.read()
 
     async def stream():
-        async for event in ingest.run_ingest(pdf_bytes):
-            if event.get("status") == "done":
-                _state["doc_id"] = event["doc_id"]
-                _state["chunk_count"] = event["chunk_count"]
-            yield f"data: {json.dumps(event)}\n\n"
+        try:
+            async for event in ingest.run_ingest(pdf_bytes):
+                if event.get("status") == "done":
+                    _state["doc_id"] = event["doc_id"]
+                    _state["chunk_count"] = event["chunk_count"]
+                yield f"data: {json.dumps(event)}\n\n"
+        except Exception as exc:
+            logger.exception("Ingest failed")
+            yield f"data: {json.dumps({'status': 'error', 'message': str(exc)})}\n\n"
 
     return StreamingResponse(stream(), media_type="text/event-stream")
 

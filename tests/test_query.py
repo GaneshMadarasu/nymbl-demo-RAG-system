@@ -34,7 +34,7 @@ async def test_run_query_yields_sources_and_done(pool):
     mock_chunk = MagicMock()
     mock_chunk.text = "AI is indeed great."
 
-    async def _fake_response(*args, **kwargs):
+    async def _fake_stream(*args, **kwargs):
         async def _iter():
             yield mock_chunk
 
@@ -48,14 +48,14 @@ async def test_run_query_yields_sources_and_done(pool):
             return_value=[0.1] * 768,
         ),
         patch.object(
-            bq._gen_model, "generate_content_async", side_effect=_fake_response
+            bq._client.aio.models, "generate_content_stream", side_effect=_fake_stream
         ),
     ):
         events = [e async for e in run_query("What is AI?", "qdoc1")]
-    types = [e["type"] for e in events]
-    assert "sources" in types
-    assert "token" in types
-    assert "done" in types
+    event_types = [e["type"] for e in events]
+    assert "sources" in event_types
+    assert "token" in event_types
+    assert "done" in event_types
 
 
 async def test_run_query_returns_i_dont_know_when_no_chunks(pool):

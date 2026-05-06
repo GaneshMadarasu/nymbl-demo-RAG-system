@@ -4,7 +4,8 @@ import logging
 import time
 from collections.abc import AsyncGenerator
 
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 
 from backend import db
 from backend.chunks import chunk_text
@@ -12,10 +13,12 @@ from backend.config import settings
 
 logger = logging.getLogger(__name__)
 
-genai.configure(api_key=settings.gemini_api_key)
-_gen_model = genai.GenerativeModel("gemini-1.5-flash")
+_client = genai.Client(api_key=settings.gemini_api_key)
 
 _BATCH_SIZE = 20
+_GEN_MODEL = "gemini-2.5-flash"
+_EMBED_MODEL = "gemini-embedding-2"
+_EMBED_DIM = 768
 
 
 def _doc_id(pdf_bytes: bytes) -> str:
@@ -23,32 +26,32 @@ def _doc_id(pdf_bytes: bytes) -> str:
 
 
 async def _extract_text(pdf_bytes: bytes) -> str:
-    loop = asyncio.get_event_loop()
     t0 = time.monotonic()
-    response = await loop.run_in_executor(
-        None,
-        lambda: _gen_model.generate_content(
-            [
-                "Extract all text from this document. Preserve paragraph structure.",
-                {"mime_type": "application/pdf", "data": pdf_bytes},
-            ]
-        ),
+    response = await _client.aio.models.generate_content(
+        model=_GEN_MODEL,
+        contents=[
+            "Extract all text from this document. Preserve paragraph structure.",
+            types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf"),
+        ],
     )
     logger.info("Gemini text extraction took %.2fs", time.monotonic() - t0)
     return response.text
 
 
-async def _embed_batch(texts: list[str]) -> list[list[float]]:
-    loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(
-        None,
-        lambda: genai.embed_content(
-            model="models/gemini-embedding-004",
-            content=texts,
-            task_type="retrieval_document",
+async def _embed_one(text: str) -> list[float]:
+    r = await _client.aio.models.embed_content(
+        model=_EMBED_MODEL,
+        contents=text,
+        config=types.EmbedContentConfig(
+            output_dimensionality=_EMBED_DIM,
+            task_type="RETRIEVAL_DOCUMENT",
         ),
     )
-    return result["embedding"]
+    return list(r.embeddings[0].values)
+
+
+async def _embed_batch(texts: list[str]) -> list[list[float]]:
+    return list(await asyncio.gather(*[_embed_one(t) for t in texts]))
 
 
 async def run_ingest(pdf_bytes: bytes) -> AsyncGenerator[dict, None]:

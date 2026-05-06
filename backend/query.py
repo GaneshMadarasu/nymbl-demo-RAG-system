@@ -1,17 +1,20 @@
-import asyncio
 import logging
 import time
 from collections.abc import AsyncGenerator
 
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 
 from backend import db
 from backend.config import settings
 
 logger = logging.getLogger(__name__)
 
-genai.configure(api_key=settings.gemini_api_key)
-_gen_model = genai.GenerativeModel("gemini-1.5-flash")
+_client = genai.Client(api_key=settings.gemini_api_key)
+
+_GEN_MODEL = "gemini-2.5-flash"
+_EMBED_MODEL = "gemini-embedding-2"
+_EMBED_DIM = 768
 
 SYSTEM_PROMPT = (
     "You are a document Q&A assistant. Answer ONLY using the provided context.\n"
@@ -21,16 +24,15 @@ SYSTEM_PROMPT = (
 
 
 async def _embed_query(text: str) -> list[float]:
-    loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(
-        None,
-        lambda: genai.embed_content(
-            model="models/gemini-embedding-004",
-            content=text,
-            task_type="retrieval_query",
+    r = await _client.aio.models.embed_content(
+        model=_EMBED_MODEL,
+        contents=text,
+        config=types.EmbedContentConfig(
+            output_dimensionality=_EMBED_DIM,
+            task_type="RETRIEVAL_QUERY",
         ),
     )
-    return result["embedding"]
+    return list(r.embeddings[0].values)
 
 
 def build_prompt(question: str, chunks: list[dict]) -> str:
@@ -63,8 +65,10 @@ async def run_query(question: str, doc_id: str) -> AsyncGenerator[dict, None]:
     prompt = build_prompt(question, chunks)
 
     t0 = time.monotonic()
-    response = _gen_model.generate_content_async(prompt, stream=True)
-    async for chunk in await response:
+    async for chunk in await _client.aio.models.generate_content_stream(
+        model=_GEN_MODEL,
+        contents=prompt,
+    ):
         if chunk.text:
             yield {"type": "token", "text": chunk.text}
     logger.info("Gemini answer took %.2fs", time.monotonic() - t0)

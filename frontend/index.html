@@ -136,8 +136,11 @@
     try {
       const res = await fetch('/ingest', { method: 'POST', body: formData });
       if (!res.ok) { const err = await res.json(); throw new Error(err.detail || 'Upload failed'); }
+      let ingestError = null;
       await readSSE(res, event => {
-        if (event.status === 'done') {
+        if (event.status === 'error') {
+          ingestError = event.message || 'Ingest failed';
+        } else if (event.status === 'done') {
           currentDoc = { name: file.name, chunkCount: event.chunk_count, docId: event.doc_id };
           showDocCard(file.name, event.chunk_count);
           hideProgress();
@@ -147,6 +150,7 @@
           showProgress(pct, event.message);
         }
       });
+      if (ingestError) throw new Error(ingestError);
     } catch (err) {
       hideProgress();
       setUploadZoneVisible(true);
