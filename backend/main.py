@@ -41,11 +41,19 @@ async def doc_info() -> dict:
     }
 
 
+_MAX_UPLOAD_BYTES = 500 * 1024 * 1024  # 500 MB
+
+
 @app.post("/ingest")
 async def ingest_pdf(file: UploadFile = File(...)) -> StreamingResponse:
     if not (file.filename or "").lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
     pdf_bytes = await file.read()
+    if len(pdf_bytes) > _MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large ({len(pdf_bytes) // 1024 // 1024} MB). Maximum is 500 MB.",
+        )
 
     async def stream():
         try:
