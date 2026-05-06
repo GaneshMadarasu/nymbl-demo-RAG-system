@@ -46,3 +46,4 @@ async def test_run_ingest_done_event_has_chunk_count(pool):
     done = next(e for e in events if e["status"] == "done")
     assert done["chunk_count"] > 0
     assert "doc_id" in done
+    assert "k" in done

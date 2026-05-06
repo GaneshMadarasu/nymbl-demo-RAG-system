@@ -20,4 +20,5 @@ async def pool():
     yield p
     async with p.acquire() as conn:
         await conn.execute("TRUNCATE TABLE chunks RESTART IDENTITY")
+        await conn.execute("TRUNCATE TABLE doc_meta")
     await p.close()

@@ -16,6 +16,13 @@ CREATE TABLE IF NOT EXISTS chunks (
     created_at  TIMESTAMPTZ DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS doc_meta (
+    doc_id      TEXT PRIMARY KEY,
+    chunk_count INTEGER NOT NULL,
+    k           INTEGER NOT NULL,
+    created_at  TIMESTAMPTZ DEFAULT now()
+);
+
 CREATE INDEX IF NOT EXISTS chunks_embedding_idx
     ON chunks USING hnsw (embedding vector_cosine_ops);
 """
@@ -73,9 +80,23 @@ async def search_chunks(
     return [dict(r) for r in rows]
 
 
+async def upsert_doc_meta(
+    pool: asyncpg.Pool, doc_id: str, chunk_count: int, k: int
+) -> None:
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO doc_meta (doc_id, chunk_count, k) VALUES ($1, $2, $3) "
+            "ON CONFLICT (doc_id) DO UPDATE SET chunk_count = $2, k = $3, created_at = now()",
+            doc_id,
+            chunk_count,
+            k,
+        )
+
+
 async def clear_all_chunks(pool: asyncpg.Pool) -> None:
     async with pool.acquire() as conn:
         await conn.execute("TRUNCATE TABLE chunks RESTART IDENTITY")
+        await conn.execute("TRUNCATE TABLE doc_meta")
 
 
 async def get_doc_info(pool: asyncpg.Pool, doc_id: str) -> dict | None:
@@ -92,9 +113,12 @@ async def get_doc_info(pool: asyncpg.Pool, doc_id: str) -> dict | None:
 async def get_latest_doc(pool: asyncpg.Pool) -> dict | None:
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT doc_id, COUNT(*) AS chunk_count FROM chunks "
-            "GROUP BY doc_id ORDER BY MAX(created_at) DESC LIMIT 1"
+            "SELECT doc_id, chunk_count, k FROM doc_meta ORDER BY created_at DESC LIMIT 1"
         )
-    if row and row["chunk_count"] > 0:
-        return {"doc_id": row["doc_id"], "chunk_count": row["chunk_count"]}
+    if row:
+        return {
+            "doc_id": row["doc_id"],
+            "chunk_count": row["chunk_count"],
+            "k": row["k"],
+        }
     return None

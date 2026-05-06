@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 FRONTEND = Path(__file__).parent.parent / "frontend" / "index.html"
 
-_state: dict = {"doc_id": None, "chunk_count": 0}
+_state: dict = {"doc_id": None, "chunk_count": 0, "k": 8}
 
 
 @asynccontextmanager
@@ -27,8 +27,12 @@ async def lifespan(app: FastAPI):
         if doc:
             _state["doc_id"] = doc["doc_id"]
             _state["chunk_count"] = doc["chunk_count"]
+            _state["k"] = doc.get("k", 8)
             logger.info(
-                "Restored doc_id=%s (%d chunks)", doc["doc_id"], doc["chunk_count"]
+                "Restored doc_id=%s (%d chunks, k=%d)",
+                doc["doc_id"],
+                doc["chunk_count"],
+                _state["k"],
             )
     except Exception:
         logger.warning("Could not restore document state from DB", exc_info=True)
@@ -80,6 +84,7 @@ async def ingest_pdf(file: UploadFile = File(...)) -> StreamingResponse:
                 if event.get("status") == "done":
                     _state["doc_id"] = event["doc_id"]
                     _state["chunk_count"] = event["chunk_count"]
+                    _state["k"] = event.get("k", 8)
                 yield f"data: {json.dumps(event)}\n\n"
         except Exception as exc:
             logger.exception("Ingest failed")
@@ -94,6 +99,7 @@ async def clear_doc() -> dict:
     await db.clear_all_chunks(pool)
     _state["doc_id"] = None
     _state["chunk_count"] = 0
+    _state["k"] = 8
     return {"cleared": True}
 
 
@@ -109,7 +115,7 @@ async def query_doc(req: QueryRequest) -> StreamingResponse:
         )
 
     async def stream():
-        async for event in query.run_query(req.question, _state["doc_id"]):
+        async for event in query.run_query(req.question, _state["doc_id"], _state["k"]):
             yield f"data: {json.dumps(event)}\n\n"
 
     return StreamingResponse(stream(), media_type="text/event-stream")

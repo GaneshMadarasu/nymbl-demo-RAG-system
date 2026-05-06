@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import time
 from collections.abc import AsyncGenerator
@@ -67,12 +68,14 @@ def build_prompt(question: str, chunks: list[dict]) -> str:
     return f"{SYSTEM_PROMPT}\n\nContext:\n{context}\n\nQuestion: {question}"
 
 
-async def run_query(question: str, doc_id: str) -> AsyncGenerator[dict, None]:
+async def run_query(
+    question: str, doc_id: str, k: int = 8
+) -> AsyncGenerator[dict, None]:
     pool = await db.get_pool()
 
     t0 = time.monotonic()
     query_emb = await _embed_query(question)
-    chunks = await db.search_chunks(pool, doc_id, query_emb, k=8)
+    chunks = await db.search_chunks(pool, doc_id, query_emb, k=k)
     logger.info(
         "Retrieval took %.2fs, got %d chunks", time.monotonic() - t0, len(chunks)
     )

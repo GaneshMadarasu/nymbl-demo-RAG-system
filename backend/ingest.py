@@ -6,12 +6,15 @@ from collections.abc import AsyncGenerator
 from io import BytesIO
 
 import fitz  # pymupdf
+import tiktoken
 from google import genai
 from google.genai import types
 
 from backend import db
 from backend.chunks import chunk_text
 from backend.config import settings
+
+_tokenizer = tiktoken.get_encoding("cl100k_base")
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +28,20 @@ _RETRY_BASE = 2.0  # delays: 2, 4, 8, 16, 32, 64s
 
 def _doc_id(pdf_bytes: bytes) -> str:
     return hashlib.sha256(pdf_bytes).hexdigest()[:16]
+
+
+def compute_params(total_tokens: int) -> tuple[int, int]:
+    """Return (chunk_size, k) scaled to document size."""
+    if total_tokens < 10_000:  # < ~20 pages
+        return 256, 5
+    elif total_tokens < 50_000:  # 20–100 pages
+        return 384, 8
+    elif total_tokens < 200_000:  # 100–400 pages
+        return 512, 12
+    elif total_tokens < 500_000:  # 400–1000 pages
+        return 768, 15
+    else:  # 1000+ pages
+        return 1024, 20
 
 
 def _extract_text(pdf_bytes: bytes) -> str:
@@ -84,7 +101,12 @@ async def run_ingest(pdf_bytes: bytes) -> AsyncGenerator[dict, None]:
     text = await loop.run_in_executor(None, _extract_text, pdf_bytes)
 
     yield {"status": "chunking", "message": "Splitting into chunks…"}
-    chunks = await loop.run_in_executor(None, chunk_text, text)
+    total_tokens = len(_tokenizer.encode(text))
+    chunk_size, k = compute_params(total_tokens)
+    logger.info(
+        "Document: %d tokens → chunk_size=%d, k=%d", total_tokens, chunk_size, k
+    )
+    chunks = await loop.run_in_executor(None, chunk_text, text, chunk_size)
     total = len(chunks)
     logger.info("Split into %d chunks", total)
 
@@ -100,10 +122,12 @@ async def run_ingest(pdf_bytes: bytes) -> AsyncGenerator[dict, None]:
 
     rows = [(i, text, emb) for i, (text, emb) in enumerate(zip(chunks, embeddings))]
     await db.insert_chunks(pool, doc_id, rows)
+    await db.upsert_doc_meta(pool, doc_id, total, k)
 
     yield {
         "status": "done",
         "doc_id": doc_id,
         "chunk_count": total,
+        "k": k,
         "message": f"Done — {total} chunks stored",
     }
