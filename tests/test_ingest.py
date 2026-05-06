@@ -25,9 +25,9 @@ async def test_run_ingest_yields_done_event(pool):
             return_value=fake_text,
         ),
         patch(
-            "backend.ingest._embed_batch",
+            "backend.ingest._embed_one",
             new_callable=AsyncMock,
-            return_value=[[0.1] * 768] * 5,
+            return_value=[0.1] * 768,
         ),
     ):
         events = [e async for e in run_ingest(b"fake-pdf-bytes")]
@@ -45,9 +45,9 @@ async def test_run_ingest_done_event_has_chunk_count(pool):
             return_value=fake_text,
         ),
         patch(
-            "backend.ingest._embed_batch",
+            "backend.ingest._embed_one",
             new_callable=AsyncMock,
-            return_value=[[0.1] * 768] * 5,
+            return_value=[0.1] * 768,
         ),
     ):
         events = [e async for e in run_ingest(b"fake-pdf-bytes")]

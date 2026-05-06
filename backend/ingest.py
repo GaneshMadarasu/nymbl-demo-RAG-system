@@ -18,7 +18,6 @@ _client = genai.Client(api_key=settings.gemini_api_key)
 _EXTRACT_MODEL = "gemini-2.5-flash"
 _EMBED_MODEL = "gemini-embedding-2"
 _EMBED_DIM = 768
-_BATCH_SIZE = 20
 _MAX_RETRIES = 6
 _RETRY_BASE = 2.0  # delays: 2, 4, 8, 16, 32, 64s
 
@@ -86,39 +85,31 @@ async def _embed_one(text: str) -> list[float]:
             raise
 
 
-async def _embed_batch(texts: list[str]) -> list[list[float]]:
-    return list(await asyncio.gather(*[_embed_one(t) for t in texts]))
-
-
 async def run_ingest(pdf_bytes: bytes) -> AsyncGenerator[dict, None]:
     pool = await db.get_pool()
     doc_id = _doc_id(pdf_bytes)
+    loop = asyncio.get_event_loop()
 
     yield {"status": "extracting", "message": "Extracting text with Gemini…"}
     text = await _extract_text(pdf_bytes)
 
     yield {"status": "chunking", "message": "Splitting into chunks…"}
-    chunks = chunk_text(text)
+    chunks = await loop.run_in_executor(None, chunk_text, text)
     total = len(chunks)
     logger.info("Split into %d chunks", total)
 
     yield {"status": "clearing", "message": "Clearing previous document…"}
     await db.clear_all_chunks(pool)
 
-    for i in range(0, total, _BATCH_SIZE):
-        batch_texts = chunks[i : i + _BATCH_SIZE]
-        embeddings = await _embed_batch(batch_texts)
-        batch_rows = [
-            (i + j, chunk_text_val, emb)
-            for j, (chunk_text_val, emb) in enumerate(zip(batch_texts, embeddings))
-        ]
-        await db.insert_chunks(pool, doc_id, batch_rows)
-        done_so_far = min(i + _BATCH_SIZE, total)
-        yield {
-            "status": "embedding",
-            "message": f"Embedding {done_so_far}/{total}…",
-            "progress": done_so_far / total,
-        }
+    yield {
+        "status": "embedding",
+        "message": f"Embedding {total} chunks…",
+        "progress": 0,
+    }
+    embeddings = list(await asyncio.gather(*[_embed_one(c) for c in chunks]))
+
+    rows = [(i, text, emb) for i, (text, emb) in enumerate(zip(chunks, embeddings))]
+    await db.insert_chunks(pool, doc_id, rows)
 
     yield {
         "status": "done",
