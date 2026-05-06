@@ -1,9 +1,10 @@
+import asyncio
 import logging
 import time
 from collections.abc import AsyncGenerator
 
+from fastembed import TextEmbedding
 from google import genai
-from google.genai import types
 
 from backend import db
 from backend.config import settings
@@ -13,8 +14,17 @@ logger = logging.getLogger(__name__)
 _client = genai.Client(api_key=settings.gemini_api_key)
 
 _GEN_MODEL = "gemini-2.5-flash"
-_EMBED_MODEL = "gemini-embedding-2"
-_EMBED_DIM = 768
+_EMBED_MODEL_NAME = "BAAI/bge-base-en-v1.5"
+
+_embedder: TextEmbedding | None = None
+
+
+def _get_embedder() -> TextEmbedding:
+    global _embedder
+    if _embedder is None:
+        _embedder = TextEmbedding(_EMBED_MODEL_NAME)
+    return _embedder
+
 
 SYSTEM_PROMPT = (
     "You are a document Q&A assistant. Answer ONLY using the provided context.\n"
@@ -24,15 +34,12 @@ SYSTEM_PROMPT = (
 
 
 async def _embed_query(text: str) -> list[float]:
-    r = await _client.aio.models.embed_content(
-        model=_EMBED_MODEL,
-        contents=text,
-        config=types.EmbedContentConfig(
-            output_dimensionality=_EMBED_DIM,
-            task_type="RETRIEVAL_QUERY",
-        ),
+    loop = asyncio.get_event_loop()
+    embedder = _get_embedder()
+    results = await loop.run_in_executor(
+        None, lambda: list(embedder.query_embed([text]))
     )
-    return list(r.embeddings[0].values)
+    return list(results[0])
 
 
 def build_prompt(question: str, chunks: list[dict]) -> str:

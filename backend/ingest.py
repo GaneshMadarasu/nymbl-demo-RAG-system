@@ -6,22 +6,25 @@ from collections.abc import AsyncGenerator
 from io import BytesIO
 
 import fitz  # pymupdf
-from google import genai
-from google.genai import types
+from fastembed import TextEmbedding
 
 from backend import db
 from backend.chunks import chunk_text
-from backend.config import settings
 
 logger = logging.getLogger(__name__)
 
-_client = genai.Client(api_key=settings.gemini_api_key)
-
 _BATCH_SIZE = 20
-_EMBED_MODEL = "gemini-embedding-2"
 _EMBED_DIM = 768
-_MAX_RETRIES = 6
-_RETRY_BASE = 2.0  # seconds; delays: 2, 4, 8, 16, 32, 64
+_EMBED_MODEL_NAME = "BAAI/bge-base-en-v1.5"
+
+_embedder: TextEmbedding | None = None
+
+
+def _get_embedder() -> TextEmbedding:
+    global _embedder
+    if _embedder is None:
+        _embedder = TextEmbedding(_EMBED_MODEL_NAME)
+    return _embedder
 
 
 def _doc_id(pdf_bytes: bytes) -> str:
@@ -33,7 +36,7 @@ def _extract_text(pdf_bytes: bytes) -> str:
     doc = fitz.open(stream=BytesIO(pdf_bytes), filetype="pdf")
     pages = [page.get_text() for page in doc]
     doc.close()
-    text = "\n\n".join(p for p in pages if p.strip())
+    text = "\n\n".join(p for p in pages if p.strip()).replace("\x00", "")
     logger.info(
         "PyMuPDF extracted %d chars from %d pages in %.2fs",
         len(text),
@@ -43,33 +46,14 @@ def _extract_text(pdf_bytes: bytes) -> str:
     return text
 
 
-def _is_rate_limit(exc: Exception) -> bool:
-    return "429" in str(exc) or "ResourceExhausted" in type(exc).__name__
-
-
-async def _embed_one(text: str) -> list[float]:
-    for attempt in range(_MAX_RETRIES):
-        try:
-            r = await _client.aio.models.embed_content(
-                model=_EMBED_MODEL,
-                contents=text,
-                config=types.EmbedContentConfig(
-                    output_dimensionality=_EMBED_DIM,
-                    task_type="RETRIEVAL_DOCUMENT",
-                ),
-            )
-            return list(r.embeddings[0].values)
-        except Exception as exc:
-            if attempt < _MAX_RETRIES - 1 and _is_rate_limit(exc):
-                wait = _RETRY_BASE**attempt
-                logger.warning("Embedding rate-limited; retrying in %.0fs", wait)
-                await asyncio.sleep(wait)
-                continue
-            raise
+def _embed_batch_sync(texts: list[str]) -> list[list[float]]:
+    embedder = _get_embedder()
+    return [list(v) for v in embedder.embed(texts)]
 
 
 async def _embed_batch(texts: list[str]) -> list[list[float]]:
-    return list(await asyncio.gather(*[_embed_one(t) for t in texts]))
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _embed_batch_sync, texts)
 
 
 async def run_ingest(pdf_bytes: bytes) -> AsyncGenerator[dict, None]:
@@ -88,8 +72,6 @@ async def run_ingest(pdf_bytes: bytes) -> AsyncGenerator[dict, None]:
     yield {"status": "clearing", "message": "Clearing previous document…"}
     await db.clear_all_chunks(pool)
 
-    # Embed and insert each batch immediately — avoids accumulating all
-    # embeddings in RAM before the first DB write (critical for large docs).
     for i in range(0, total, _BATCH_SIZE):
         batch_texts = chunks[i : i + _BATCH_SIZE]
         embeddings = await _embed_batch(batch_texts)
