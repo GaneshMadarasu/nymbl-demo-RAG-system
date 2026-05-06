@@ -6,8 +6,8 @@ Single-document RAG system: upload a PDF, ask questions, get grounded answers wi
 
 | Layer | Technology |
 |-------|-----------|
-| PDF extraction | PyMuPDF (`fitz`) |
-| Embeddings | `BAAI/bge-base-en-v1.5` via fastembed (768-dim, local ONNX) |
+| PDF extraction | Gemini 2.5 Flash |
+| Embeddings | `gemini-embedding-2` (768-dim) |
 | Chunking | tiktoken-aware sentence-boundary splitter |
 | Answering | Gemini 2.5 Flash (streamed) |
 | Vector store | Postgres 16 + pgvector (HNSW) |
@@ -70,14 +70,14 @@ pytest -v
 
 ## Design decisions
 
-**PDF extraction — PyMuPDF instead of Gemini**
-The spec recommends using Gemini to extract plaintext from PDFs. We use PyMuPDF locally instead. For PDFs that are already structured text (not scanned images), a local parser produces equivalent quality with no API cost, no quota consumption, and no added latency. Gemini extraction makes sense when the input includes images or complex layouts; for text-native PDFs it's unnecessary overhead.
+**Gemini for PDF extraction**
+Handles complex layouts, scanned pages, and embedded images that a local parser would miss. Returns clean plaintext directly without pre/post-processing.
 
-**Embeddings — fastembed (`bge-base-en-v1.5`) instead of Gemini Embeddings**
-The spec recommends Gemini Embeddings. The Gemini embedding API has a hard daily quota on the free tier that is easy to exhaust during development and demos. `BAAI/bge-base-en-v1.5` runs locally via ONNX (no GPU required), requires no API key, produces the same 768-dim vectors, and is a well-benchmarked open model. This makes the demo reliably runnable without any quota management.
+**`gemini-embedding-2` for embeddings**
+768-dim vectors, consistent similarity space with the same provider used for answering, and supports separate `RETRIEVAL_DOCUMENT` / `RETRIEVAL_QUERY` task types which improve retrieval accuracy.
 
 **Chunking — token-aware sentence-boundary splitter**
-The spec asks for "reasonable chunk size with overlap." Rather than splitting on raw character count, we use `tiktoken` to measure token length accurately and split only at sentence boundaries. This keeps chunks semantically coherent and avoids splitting mid-sentence, which degrades retrieval quality.
+Rather than splitting on raw character count, `tiktoken` measures token length accurately and splits only at sentence boundaries. This keeps chunks semantically coherent and avoids splitting mid-sentence, which degrades retrieval quality.
 
 **pgvector HNSW index**
 Fast approximate nearest-neighbour search with good recall at demo scale. No separate vector database service needed — Postgres handles both structured data and vector search.
