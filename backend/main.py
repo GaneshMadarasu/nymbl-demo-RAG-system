@@ -1,5 +1,6 @@
 import json
 import logging
+import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -15,6 +16,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 FRONTEND = Path(__file__).parent.parent / "frontend" / "index.html"
+VIEWER = Path(__file__).parent.parent / "frontend" / "viewer.html"
+_PDF_PATH = Path(tempfile.gettempdir()) / "docrag_current.pdf"
 
 _state: dict = {"doc_id": None, "chunk_count": 0, "k": 8}
 
@@ -45,6 +48,25 @@ app = FastAPI(title="DocRAG", lifespan=lifespan)
 @app.get("/")
 async def serve_frontend() -> FileResponse:
     return FileResponse(FRONTEND)
+
+
+@app.get("/viewer")
+async def serve_viewer() -> FileResponse:
+    return FileResponse(VIEWER)
+
+
+@app.get("/doc/pdf")
+async def serve_pdf() -> FileResponse:
+    if not _state["doc_id"]:
+        raise HTTPException(status_code=404, detail="No document loaded.")
+    if not _PDF_PATH.exists():
+        raise HTTPException(
+            status_code=404,
+            detail="PDF not available — re-upload the document.",
+        )
+    return FileResponse(
+        _PDF_PATH, media_type="application/pdf", filename="document.pdf"
+    )
 
 
 @app.get("/health")
@@ -85,6 +107,7 @@ async def ingest_pdf(file: UploadFile = File(...)) -> StreamingResponse:
                     _state["doc_id"] = event["doc_id"]
                     _state["chunk_count"] = event["chunk_count"]
                     _state["k"] = event.get("k", 8)
+                    _PDF_PATH.write_bytes(pdf_bytes)
                 yield f"data: {json.dumps(event)}\n\n"
         except Exception as exc:
             logger.exception("Ingest failed")
@@ -100,6 +123,7 @@ async def clear_doc() -> dict:
     _state["doc_id"] = None
     _state["chunk_count"] = 0
     _state["k"] = 8
+    _PDF_PATH.unlink(missing_ok=True)
     return {"cleared": True}
 
 

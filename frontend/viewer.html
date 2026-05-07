@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DocRAG – Viewer</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0a0a14; color: #e2e8f0; font-family: system-ui, -apple-system, sans-serif; min-height: 100vh; }
+
+    #header {
+      position: sticky; top: 0; z-index: 100;
+      background: #11112b; border-bottom: 1px solid #2a2a4a;
+      padding: 10px 16px; display: flex; align-items: center; gap: 8px; font-size: 13px;
+    }
+    .logo { color: #818cf8; font-weight: 700; letter-spacing: 2px; font-size: 13px; }
+    .sep { color: #2a2a4a; font-size: 16px; }
+    .chunk-id { color: #e2e8f0; font-weight: 600; }
+    .hint { margin-left: auto; font-size: 11px; color: #64748b; }
+
+    #status { padding: 48px 20px; text-align: center; color: #64748b; font-size: 14px; }
+    #status.error { color: #f87171; }
+
+    #pages {
+      padding: 24px 20px;
+      display: flex; flex-direction: column; align-items: center; gap: 24px;
+      overflow-x: auto;
+    }
+
+    .page-container { display: flex; flex-direction: column; align-items: center; }
+    .page-label { font-size: 11px; color: #64748b; margin-bottom: 6px; }
+    .page-wrap { position: relative; box-shadow: 0 4px 24px rgba(0,0,0,.7); border-radius: 2px; overflow: hidden; }
+    canvas { display: block; }
+    .overlay { position: absolute; top: 0; left: 0; pointer-events: none; }
+
+    .toast {
+      position: fixed; bottom: 20px; right: 20px;
+      background: #34d399; color: #052e16;
+      padding: 10px 16px; border-radius: 8px;
+      font-weight: 600; font-size: 13px;
+      box-shadow: 0 4px 20px rgba(0,0,0,.5);
+      animation: fadeout 0.4s 2.8s ease-out forwards;
+    }
+    .warn {
+      position: fixed; bottom: 20px; right: 20px;
+      background: rgba(248,113,113,.12); border: 1px solid rgba(248,113,113,.35);
+      color: #f87171; padding: 10px 16px; border-radius: 8px; font-size: 12px; max-width: 300px;
+    }
+    @keyframes fadeout { to { opacity: 0; transform: translateY(6px); } }
+  </style>
+</head>
+<body>
+  <div id="header">
+    <span class="logo">DOCRAG</span>
+    <span class="sep">|</span>
+    <span class="chunk-id" id="chunk-id">Document Viewer</span>
+    <span class="hint">Chunk highlighted in yellow</span>
+  </div>
+  <div id="status">Loading document…</div>
+  <div id="pages"></div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <script>
+  pdfjsLib.GlobalWorkerOptions.workerSrc =
+    'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+  const params = new URLSearchParams(location.search);
+  const chunkText = params.get('text') || '';
+  const chunkIdx  = params.get('chunk') || '';
+
+  if (chunkIdx) document.getElementById('chunk-id').textContent = `Chunk ${chunkIdx}`;
+
+  // Normalise: lowercase + collapse whitespace (length-preserving enough for index mapping)
+  const norm = s => s.toLowerCase().replace(/\s+/g, ' ');
+  const queryNorm = norm(chunkText).trim().slice(0, 150);
+
+  // Significant words for fallback matching (≥5 chars)
+  const sigWords = norm(chunkText).match(/\b[a-z]{5,}\b/g)?.slice(0, 8) || [];
+
+  async function main() {
+    const statusEl = document.getElementById('status');
+    const pagesDiv = document.getElementById('pages');
+    let scrollTarget = null;
+    let matchPage   = null;
+
+    try {
+      const pdf = await pdfjsLib.getDocument('/doc/pdf').promise;
+      statusEl.textContent = '';
+
+      for (let n = 1; n <= pdf.numPages; n++) {
+        const page = await pdf.getPage(n);
+
+        // Responsive scale: fit window width with a max of 1.5
+        const baseVp = page.getViewport({ scale: 1 });
+        const scale  = Math.min(1.5, (window.innerWidth - 48) / baseVp.width);
+        const vp     = page.getViewport({ scale });
+
+        // DOM structure
+        const container = document.createElement('div');
+        container.className = 'page-container';
+        const label = document.createElement('div');
+        label.className = 'page-label';
+        label.textContent = `Page ${n} of ${pdf.numPages}`;
+        container.appendChild(label);
+
+        const wrap = document.createElement('div');
+        wrap.className = 'page-wrap';
+        wrap.style.width  = vp.width  + 'px';
+        wrap.style.height = vp.height + 'px';
+
+        const canvas  = document.createElement('canvas');
+        canvas.width  = vp.width; canvas.height = vp.height;
+        const overlay = document.createElement('canvas');
+        overlay.className = 'overlay';
+        overlay.width  = vp.width; overlay.height = vp.height;
+
+        wrap.appendChild(canvas); wrap.appendChild(overlay);
+        container.appendChild(wrap);
+        pagesDiv.appendChild(container);
+
+        // Render page
+        await page.render({ canvasContext: canvas.getContext('2d'), viewport: vp }).promise;
+
+        // Text search & highlight (only until first match found)
+        if (!scrollTarget && chunkText) {
+          const tc    = await page.getTextContent();
+          const items = tc.items.filter(it => it.str);
+
+          // Build concatenated text and per-item character ranges
+          let pageText = '';
+          const bounds = [];
+          for (const it of items) {
+            bounds.push({ start: pageText.length, end: pageText.length + it.str.length, item: it });
+            pageText += it.str + ' ';
+          }
+
+          const pageNorm = norm(pageText);
+          let matchStart = queryNorm ? pageNorm.indexOf(queryNorm) : -1;
+          let matchEnd   = matchStart !== -1 ? matchStart + queryNorm.length : -1;
+
+          // Fallback: ordered word sequence search
+          if (matchStart === -1 && sigWords.length >= 3) {
+            let pos = 0, startPos = -1;
+            for (const w of sigWords) {
+              const idx = pageNorm.indexOf(w, pos);
+              if (idx === -1) { startPos = -1; break; }
+              if (startPos === -1) startPos = idx;
+              pos = idx + w.length;
+            }
+            if (startPos !== -1) { matchStart = startPos; matchEnd = pos; }
+          }
+
+          if (matchStart !== -1) {
+            scrollTarget = wrap;
+            matchPage    = n;
+
+            // Map normalised match range back to raw positions (ratio approximation)
+            const ratio    = pageText.length / (pageNorm.length || 1);
+            const rawStart = Math.floor(matchStart * ratio);
+            const rawEnd   = Math.ceil(matchEnd * ratio);
+
+            const ctx = overlay.getContext('2d');
+            ctx.fillStyle = 'rgba(251,191,36,0.38)';
+
+            for (const { start, end, item } of bounds) {
+              if (end < rawStart || start > rawEnd) continue;
+              if (!item.width || !item.str.trim()) continue;
+              const tx = item.transform;
+              const [cx, cy] = pdfjsLib.Util.applyTransform([tx[4], tx[5]], vp.transform);
+              const h = (item.height || 12) * scale;
+              const w = item.width * scale;
+              ctx.fillRect(cx - 1, cy - h - 1, w + 2, h + 4);
+            }
+          }
+        }
+      }
+
+      // Scroll to match and show feedback
+      if (scrollTarget) {
+        scrollTarget.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        const t = document.createElement('div');
+        t.className = 'toast';
+        t.textContent = `Chunk found on page ${matchPage}`;
+        document.body.appendChild(t);
+        setTimeout(() => t.remove(), 3400);
+      } else if (chunkText) {
+        const w = document.createElement('div');
+        w.className = 'warn';
+        w.textContent = 'Could not pinpoint this chunk — text extraction may differ from pdfplumber.';
+        document.body.appendChild(w);
+        setTimeout(() => w.remove(), 6000);
+      }
+
+    } catch (err) {
+      statusEl.textContent = 'Failed to load PDF: ' + err.message;
+      statusEl.classList.add('error');
+    }
+  }
+
+  main();
+  </script>
+</body>
+</html>
