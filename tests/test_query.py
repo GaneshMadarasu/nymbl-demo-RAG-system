@@ -30,7 +30,9 @@ async def test_run_query_yields_sources_and_done(pool):
     from backend.db import insert_chunks
     import backend.query as bq
 
-    await insert_chunks(pool, "qdoc1", [(0, "AI is great for research.", [0.1] * 768)])
+    await insert_chunks(
+        pool, "qdoc1", [(0, "AI is great for research.", None, [0.1] * 768)]
+    )
     mock_chunk = MagicMock()
     mock_chunk.text = "AI is indeed great."
 

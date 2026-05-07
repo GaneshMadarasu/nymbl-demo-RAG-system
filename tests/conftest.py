@@ -12,11 +12,12 @@ from backend.config import settings
 
 @pytest.fixture
 async def pool():
-    from backend.db import SCHEMA  # deferred: backend/db.py created in Task 2
+    from backend.db import SCHEMA, MIGRATION
 
     p = await asyncpg.create_pool(settings.database_url)
     async with p.acquire() as conn:
         await conn.execute(SCHEMA)
+        await conn.execute(MIGRATION)
     yield p
     async with p.acquire() as conn:
         await conn.execute("TRUNCATE TABLE chunks RESTART IDENTITY")

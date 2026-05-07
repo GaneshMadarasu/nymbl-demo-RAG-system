@@ -92,10 +92,37 @@ async def _embed_one(text: str) -> list[float]:
             raise
 
 
+def _parent_texts(chunks: list[str]) -> list[str]:
+    """Return adjacent-window text for each chunk (prev + self + next)."""
+    result = []
+    for i, chunk in enumerate(chunks):
+        parts = []
+        if i > 0:
+            parts.append(chunks[i - 1])
+        parts.append(chunk)
+        if i < len(chunks) - 1:
+            parts.append(chunks[i + 1])
+        result.append(" ".join(parts))
+    return result
+
+
 async def run_ingest(pdf_bytes: bytes) -> AsyncGenerator[dict, None]:
     pool = await db.get_pool()
     doc_id = _doc_id(pdf_bytes)
     loop = asyncio.get_event_loop()
+
+    if await db.doc_exists(pool, doc_id):
+        doc = await db.get_latest_doc(pool)
+        logger.info("doc_id=%s already indexed — skipping re-embedding", doc_id)
+        yield {
+            "status": "done",
+            "doc_id": doc_id,
+            "chunk_count": doc["chunk_count"],
+            "k": doc["k"],
+            "cached": True,
+            "message": "Document already indexed — loaded from cache",
+        }
+        return
 
     yield {"status": "extracting", "message": "Extracting text from PDF…"}
     text = await loop.run_in_executor(None, _extract_text, pdf_bytes)
@@ -120,7 +147,11 @@ async def run_ingest(pdf_bytes: bytes) -> AsyncGenerator[dict, None]:
     }
     embeddings = list(await asyncio.gather(*[_embed_one(c) for c in chunks]))
 
-    rows = [(i, text, emb) for i, (text, emb) in enumerate(zip(chunks, embeddings))]
+    parents = _parent_texts(chunks)
+    rows = [
+        (i, chunk, parent, emb)
+        for i, (chunk, parent, emb) in enumerate(zip(chunks, parents, embeddings))
+    ]
     await db.insert_chunks(pool, doc_id, rows)
     await db.upsert_doc_meta(pool, doc_id, total, k)
 

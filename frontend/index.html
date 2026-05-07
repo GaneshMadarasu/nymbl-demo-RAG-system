@@ -43,8 +43,12 @@
     .msg.user .bubble { background: var(--user-bubble); color: var(--muted); }
     .msg.assistant .bubble { background: var(--bubble); border-left: 3px solid var(--accent); }
     .citations { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
-    .pill { background: var(--pill-bg); color: var(--accent); border-radius: 20px; padding: 2px 10px; font-size: 11px; cursor: pointer; position: relative; transition: background .2s; user-select: none; }
+    .pill { background: var(--pill-bg); color: var(--accent); border-radius: 20px; padding: 2px 10px; font-size: 11px; cursor: pointer; position: relative; transition: background .2s; user-select: none; display: inline-flex; align-items: center; gap: 5px; }
     .pill:hover { background: #2a4a6f; }
+    .pill-sim { font-size: 9px; font-weight: 700; padding: 1px 5px; border-radius: 10px; line-height: 1.4; }
+    .sim-high { background: rgba(52,211,153,.2); color: #34d399; }
+    .sim-mid  { background: rgba(251,191,36,.2);  color: #fbbf24; }
+    .sim-low  { background: rgba(248,113,113,.2); color: #f87171; }
     .tooltip { display: none; position: absolute; bottom: calc(100% + 6px); left: 50%; transform: translateX(-50%); background: #1e1e42; border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; font-size: 11px; color: var(--text); line-height: 1.5; width: 280px; white-space: normal; z-index: 10; box-shadow: 0 8px 24px rgba(0,0,0,.5); }
     .pill:hover .tooltip { display: block; }
     .error-bubble { align-self: flex-start; background: rgba(248,113,113,.1); border-left: 3px solid #f87171; color: #f87171; padding: 10px 14px; border-radius: var(--radius); font-size: 13px; }
@@ -211,12 +215,23 @@
     msg.appendChild(bubble); $('messages').appendChild(msg); scrollToBottom(); return bubble;
   }
 
+  function simBadge(sim) {
+    if (sim == null) return '';
+    const pct = Math.round(sim * 100);
+    const cls = pct >= 75 ? 'sim-high' : pct >= 50 ? 'sim-mid' : 'sim-low';
+    return `<span class="pill-sim ${cls}">${pct}%</span>`;
+  }
+
+  function makePill(chunkIndex, text, sim) {
+    const tip = `<span class="tooltip">${escapeHtml(text)}</span>`;
+    return `<span class="pill">§ Chunk ${chunkIndex}${simBadge(sim)}${tip}</span>`;
+  }
+
   function renderFinalAnswer(bubble, text, chunks) {
     const escaped = text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
     const withPills = escaped.replace(/\[Chunk (\d+)\]/g, (_, n) => {
       const chunk = chunks.find(c => c.chunk_index === parseInt(n));
-      const tipText = chunk ? chunk.text.replace(/"/g, '&quot;') : '';
-      return `<span class="pill">§ Chunk ${n}<span class="tooltip">${tipText}</span></span>`;
+      return makePill(n, chunk ? chunk.text : '', chunk ? chunk.similarity : null);
     });
     bubble.innerHTML = withPills;
     if (chunks.length > 0) {
@@ -224,9 +239,9 @@
       const seen = new Set();
       chunks.forEach(c => {
         if (seen.has(c.chunk_index)) return; seen.add(c.chunk_index);
-        const pill = document.createElement('span'); pill.className = 'pill';
-        pill.innerHTML = `§ Chunk ${c.chunk_index}<span class="tooltip">${escapeHtml(c.text)}</span>`;
-        cites.appendChild(pill);
+        const pill = document.createElement('span');
+        pill.innerHTML = makePill(c.chunk_index, c.text, c.similarity);
+        cites.appendChild(pill.firstChild);
       });
       bubble.closest('.msg').appendChild(cites);
     }

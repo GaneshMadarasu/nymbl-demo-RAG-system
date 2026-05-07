@@ -1,5 +1,7 @@
 import asyncio
+import json
 import logging
+import re
 import time
 from collections.abc import AsyncGenerator
 
@@ -24,7 +26,6 @@ SYSTEM_PROMPT = (
     "If the context doesn't contain enough information, respond with exactly: \"I don't know.\"\n"
     "Cite sources as [Chunk N] inline throughout your answer."
 )
-
 
 _MAX_RETRIES = 6
 _RETRY_BASE = 2.0
@@ -63,8 +64,42 @@ async def _embed_query(text: str) -> list[float]:
             raise
 
 
+async def _rerank(question: str, chunks: list[dict], top_n: int) -> list[dict]:
+    """Ask Gemini to re-rank chunks by relevance; falls back to original order on failure."""
+    if len(chunks) <= top_n:
+        return chunks
+    snippets = "\n\n".join(f"[{i}]: {c['text'][:400]}" for i, c in enumerate(chunks))
+    prompt = (
+        "Rank these text chunks by relevance to the question. "
+        "Return ONLY a JSON array of indices, most relevant first, e.g. [2,0,1].\n\n"
+        f"Question: {question}\n\nChunks:\n{snippets}"
+    )
+    try:
+        r = await _client.aio.models.generate_content(model=_GEN_MODEL, contents=prompt)
+        match = re.search(r"\[[\d,\s]+\]", r.text or "")
+        if not match:
+            return chunks[:top_n]
+        indices = json.loads(match.group())
+        seen: set[int] = set()
+        result: list[dict] = []
+        for i in indices:
+            if isinstance(i, int) and 0 <= i < len(chunks) and i not in seen:
+                result.append(chunks[i])
+                seen.add(i)
+        for i, c in enumerate(chunks):
+            if i not in seen:
+                result.append(c)
+        return result[:top_n]
+    except Exception as exc:
+        logger.warning("Re-ranking failed (%s); using retrieval order", exc)
+        return chunks[:top_n]
+
+
 def build_prompt(question: str, chunks: list[dict]) -> str:
-    context = "\n".join(f'[Chunk {r["chunk_index"]}]: "{r["text"]}"' for r in chunks)
+    context = "\n".join(
+        f'[Chunk {r["chunk_index"]}]: "{r.get("parent_text") or r["text"]}"'
+        for r in chunks
+    )
     return f"{SYSTEM_PROMPT}\n\nContext:\n{context}\n\nQuestion: {question}"
 
 
@@ -75,20 +110,43 @@ async def run_query(
 
     t0 = time.monotonic()
     query_emb = await _embed_query(question)
-    chunks = await db.search_chunks(pool, doc_id, query_emb, k=k)
-    logger.info(
-        "Retrieval took %.2fs, got %d chunks", time.monotonic() - t0, len(chunks)
-    )
+    raw_chunks = await db.search_chunks(pool, doc_id, query_emb, question=question, k=k)
+    retrieval_elapsed = time.monotonic() - t0
 
-    if not chunks:
+    if raw_chunks:
+        sims = [c["similarity"] for c in raw_chunks]
+        logger.info(
+            "Retrieval took %.2fs — %d chunks, avg_sim=%.3f, min_sim=%.3f",
+            retrieval_elapsed,
+            len(raw_chunks),
+            sum(sims) / len(sims),
+            min(sims),
+        )
+
+    if not raw_chunks:
         yield {"type": "token", "text": "I don't know."}
         yield {"type": "done"}
         return
 
+    rerank_top = max(1, k // 2)
+    t_rerank = time.monotonic()
+    chunks = await _rerank(question, raw_chunks, top_n=rerank_top)
+    logger.info(
+        "Re-ranking took %.2fs — kept %d/%d chunks",
+        time.monotonic() - t_rerank,
+        len(chunks),
+        len(raw_chunks),
+    )
+
     yield {
         "type": "sources",
         "chunks": [
-            {"chunk_index": c["chunk_index"], "text": c["text"]} for c in chunks
+            {
+                "chunk_index": c["chunk_index"],
+                "text": c["text"],
+                "similarity": round(float(c["similarity"]), 3),
+            }
+            for c in chunks
         ],
     }
 

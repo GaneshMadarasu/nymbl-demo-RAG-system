@@ -12,7 +12,9 @@ CREATE TABLE IF NOT EXISTS chunks (
     doc_id      TEXT NOT NULL,
     chunk_index INTEGER NOT NULL,
     text        TEXT NOT NULL,
+    parent_text TEXT,
     embedding   vector(768) NOT NULL,
+    tsv         tsvector GENERATED ALWAYS AS (to_tsvector('english', coalesce(text, ''))) STORED,
     created_at  TIMESTAMPTZ DEFAULT now()
 );
 
@@ -23,8 +25,29 @@ CREATE TABLE IF NOT EXISTS doc_meta (
     created_at  TIMESTAMPTZ DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS chunks_embedding_idx
-    ON chunks USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX IF NOT EXISTS chunks_embedding_idx ON chunks USING hnsw (embedding vector_cosine_ops);
+"""
+
+# Adds columns/indexes that may be missing on existing installations.
+MIGRATION = """
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'chunks' AND column_name = 'parent_text'
+    ) THEN
+        ALTER TABLE chunks ADD COLUMN parent_text TEXT;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'chunks' AND column_name = 'tsv'
+    ) THEN
+        ALTER TABLE chunks ADD COLUMN tsv tsvector
+            GENERATED ALWAYS AS (to_tsvector('english', coalesce(text, ''))) STORED;
+    END IF;
+    CREATE INDEX IF NOT EXISTS chunks_tsv_idx ON chunks USING gin(tsv);
+END
+$$;
 """
 
 
@@ -38,6 +61,7 @@ async def get_pool() -> asyncpg.Pool:
                 _pool = await asyncpg.create_pool(settings.database_url)
                 async with _pool.acquire() as conn:
                     await conn.execute(SCHEMA)
+                    await conn.execute(MIGRATION)
             except Exception:
                 _pool = None
                 raise
@@ -51,33 +75,85 @@ def _vec(embedding: list[float]) -> str:
 async def insert_chunks(
     pool: asyncpg.Pool,
     doc_id: str,
-    chunks: list[tuple[int, str, list[float]]],
+    chunks: list[tuple[int, str, str | None, list[float]]],
 ) -> None:
     async with pool.acquire() as conn:
         await conn.executemany(
-            "INSERT INTO chunks (doc_id, chunk_index, text, embedding) "
-            "VALUES ($1, $2, $3, $4::vector)",
-            [(doc_id, idx, text, _vec(emb)) for idx, text, emb in chunks],
+            "INSERT INTO chunks (doc_id, chunk_index, text, parent_text, embedding) "
+            "VALUES ($1, $2, $3, $4, $5::vector)",
+            [
+                (doc_id, idx, text, parent_text, _vec(emb))
+                for idx, text, parent_text, emb in chunks
+            ],
         )
+
+
+_HYBRID_SQL = """
+WITH
+dense AS (
+    SELECT chunk_index, text, parent_text,
+           1 - (embedding <=> $1::vector) AS similarity,
+           ROW_NUMBER() OVER (ORDER BY embedding <=> $1::vector) AS rank
+    FROM chunks WHERE doc_id = $2
+    ORDER BY embedding <=> $1::vector LIMIT $3 * 2
+),
+sparse AS (
+    SELECT chunk_index, text, parent_text,
+           ROW_NUMBER() OVER (
+               ORDER BY ts_rank_cd(tsv, plainto_tsquery('english', $4)) DESC
+           ) AS rank
+    FROM chunks
+    WHERE doc_id = $2
+      AND tsv @@ plainto_tsquery('english', $4)
+    ORDER BY ts_rank_cd(tsv, plainto_tsquery('english', $4)) DESC
+    LIMIT $3 * 2
+),
+fused AS (
+    SELECT
+        COALESCE(d.chunk_index, s.chunk_index) AS chunk_index,
+        COALESCE(d.text, s.text)               AS text,
+        COALESCE(d.parent_text, s.parent_text) AS parent_text,
+        COALESCE(d.similarity, 0.0)             AS similarity,
+        COALESCE(1.0 / (60.0 + d.rank), 0.0) +
+        COALESCE(1.0 / (60.0 + s.rank), 0.0)   AS rrf_score
+    FROM dense d
+    FULL OUTER JOIN sparse s ON d.chunk_index = s.chunk_index
+)
+SELECT chunk_index, text, parent_text, similarity, rrf_score
+FROM fused
+ORDER BY rrf_score DESC
+LIMIT $3
+"""
+
+_DENSE_SQL = """
+SELECT chunk_index, text, parent_text,
+       1 - (embedding <=> $1::vector) AS similarity,
+       1 - (embedding <=> $1::vector) AS rrf_score
+FROM chunks WHERE doc_id = $2
+ORDER BY embedding <=> $1::vector LIMIT $3
+"""
 
 
 async def search_chunks(
     pool: asyncpg.Pool,
     doc_id: str,
     query_embedding: list[float],
+    question: str = "",
     k: int = 5,
 ) -> list[dict]:
+    vec = _vec(query_embedding)
     async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT id, chunk_index, text, "
-            "1 - (embedding <=> $1::vector) AS similarity "
-            "FROM chunks WHERE doc_id = $2 "
-            "ORDER BY embedding <=> $1::vector LIMIT $3",
-            _vec(query_embedding),
-            doc_id,
-            k,
-        )
+        if question.strip():
+            rows = await conn.fetch(_HYBRID_SQL, vec, doc_id, k, question)
+        else:
+            rows = await conn.fetch(_DENSE_SQL, vec, doc_id, k)
     return [dict(r) for r in rows]
+
+
+async def doc_exists(pool: asyncpg.Pool, doc_id: str) -> bool:
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT 1 FROM doc_meta WHERE doc_id = $1", doc_id)
+    return row is not None
 
 
 async def upsert_doc_meta(
