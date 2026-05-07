@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS chunks (
     chunk_index INTEGER NOT NULL,
     text        TEXT NOT NULL,
     parent_text TEXT,
+    page_number INTEGER,
     embedding   vector(768) NOT NULL,
     tsv         tsvector GENERATED ALWAYS AS (to_tsvector('english', coalesce(text, ''))) STORED,
     created_at  TIMESTAMPTZ DEFAULT now()
@@ -46,6 +47,12 @@ BEGIN
             GENERATED ALWAYS AS (to_tsvector('english', coalesce(text, ''))) STORED;
     END IF;
     CREATE INDEX IF NOT EXISTS chunks_tsv_idx ON chunks USING gin(tsv);
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'chunks' AND column_name = 'page_number'
+    ) THEN
+        ALTER TABLE chunks ADD COLUMN page_number INTEGER;
+    END IF;
 END
 $$;
 """
@@ -75,15 +82,15 @@ def _vec(embedding: list[float]) -> str:
 async def insert_chunks(
     pool: asyncpg.Pool,
     doc_id: str,
-    chunks: list[tuple[int, str, str | None, list[float]]],
+    chunks: list[tuple[int, str, str | None, list[float], int | None]],
 ) -> None:
     async with pool.acquire() as conn:
         await conn.executemany(
-            "INSERT INTO chunks (doc_id, chunk_index, text, parent_text, embedding) "
-            "VALUES ($1, $2, $3, $4, $5::vector)",
+            "INSERT INTO chunks (doc_id, chunk_index, text, parent_text, embedding, page_number) "
+            "VALUES ($1, $2, $3, $4, $5::vector, $6)",
             [
-                (doc_id, idx, text, parent_text, _vec(emb))
-                for idx, text, parent_text, emb in chunks
+                (doc_id, idx, text, parent_text, _vec(emb), page_num)
+                for idx, text, parent_text, emb, page_num in chunks
             ],
         )
 
@@ -148,6 +155,18 @@ async def search_chunks(
         else:
             rows = await conn.fetch(_DENSE_SQL, vec, doc_id, k)
     return [dict(r) for r in rows]
+
+
+async def get_chunk_text(
+    pool: asyncpg.Pool, doc_id: str, chunk_index: int
+) -> dict | None:
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT text, page_number FROM chunks WHERE doc_id = $1 AND chunk_index = $2",
+            doc_id,
+            chunk_index,
+        )
+    return {"text": row["text"], "page_number": row["page_number"]} if row else None
 
 
 async def doc_exists(pool: asyncpg.Pool, doc_id: str) -> bool:

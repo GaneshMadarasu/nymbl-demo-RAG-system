@@ -44,19 +44,34 @@ def compute_params(total_tokens: int) -> tuple[int, int]:
         return 1024, 20
 
 
-def _extract_text(pdf_bytes: bytes) -> str:
+def _extract_text(pdf_bytes: bytes) -> tuple[str, list[str]]:
+    """Returns (full_text, per_page_texts) where per_page_texts is 1-indexed (index 0 unused)."""
     t0 = time.monotonic()
     doc = fitz.open(stream=BytesIO(pdf_bytes), filetype="pdf")
-    pages = [page.get_text() for page in doc]
+    pages = [page.get_text().replace("\x00", "") for page in doc]
     doc.close()
-    text = "\n\n".join(p for p in pages if p.strip()).replace("\x00", "")
+    text = "\n\n".join(p for p in pages if p.strip())
     logger.info(
         "PyMuPDF extracted %d chars from %d pages in %.2fs",
         len(text),
         len(pages),
         time.monotonic() - t0,
     )
-    return text
+    return text, pages  # pages[0] = page 1 text, pages[1] = page 2 text, ...
+
+
+def _find_chunk_page(chunk: str, pages: list[str]) -> int:
+    """Return the 1-indexed page number where this chunk starts.
+    Normalises whitespace so chunker's sentence-joining matches page text."""
+    norm = lambda s: " ".join(s.split())
+    for anchor_len in (80, 50, 30):
+        anchor = norm(chunk[:anchor_len])
+        if not anchor:
+            continue
+        for page_num, pt in enumerate(pages, 1):
+            if anchor in norm(pt):
+                return page_num
+    return 1  # fallback
 
 
 def _is_retryable(exc: Exception) -> bool:
@@ -125,7 +140,7 @@ async def run_ingest(pdf_bytes: bytes) -> AsyncGenerator[dict, None]:
         return
 
     yield {"status": "extracting", "message": "Extracting text from PDF…"}
-    text = await loop.run_in_executor(None, _extract_text, pdf_bytes)
+    text, pages = await loop.run_in_executor(None, _extract_text, pdf_bytes)
 
     yield {"status": "chunking", "message": "Splitting into chunks…"}
     total_tokens = len(_tokenizer.encode(text))
@@ -148,9 +163,12 @@ async def run_ingest(pdf_bytes: bytes) -> AsyncGenerator[dict, None]:
     embeddings = list(await asyncio.gather(*[_embed_one(c) for c in chunks]))
 
     parents = _parent_texts(chunks)
+    page_nums = [_find_chunk_page(c, pages) for c in chunks]
     rows = [
-        (i, chunk, parent, emb)
-        for i, (chunk, parent, emb) in enumerate(zip(chunks, parents, embeddings))
+        (i, chunk, parent, emb, page_num)
+        for i, (chunk, parent, emb, page_num) in enumerate(
+            zip(chunks, parents, embeddings, page_nums)
+        )
     ]
     await db.insert_chunks(pool, doc_id, rows)
     await db.upsert_doc_meta(pool, doc_id, total, k)

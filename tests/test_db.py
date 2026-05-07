@@ -2,9 +2,9 @@ import pytest
 from backend.db import insert_chunks, search_chunks, clear_all_chunks, get_doc_info
 
 
-# helpers — (idx, text, parent_text, embedding)
+# helpers — (idx, text, parent_text, embedding, page_number)
 def _row(idx, text, emb):
-    return (idx, text, None, emb)
+    return (idx, text, None, emb, None)
 
 
 async def test_insert_and_search(pool):

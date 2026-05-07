@@ -7,32 +7,26 @@
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     body { background: #0a0a14; color: #e2e8f0; font-family: system-ui, -apple-system, sans-serif; min-height: 100vh; }
-
     #header {
       position: sticky; top: 0; z-index: 100;
       background: #11112b; border-bottom: 1px solid #2a2a4a;
       padding: 10px 16px; display: flex; align-items: center; gap: 8px; font-size: 13px;
     }
-    .logo { color: #818cf8; font-weight: 700; letter-spacing: 2px; font-size: 13px; }
-    .sep { color: #2a2a4a; font-size: 16px; }
+    .logo { color: #818cf8; font-weight: 700; letter-spacing: 2px; }
+    .sep  { color: #2a2a4a; font-size: 16px; }
     .chunk-id { color: #e2e8f0; font-weight: 600; }
     .hint { margin-left: auto; font-size: 11px; color: #64748b; }
-
     #status { padding: 48px 20px; text-align: center; color: #64748b; font-size: 14px; }
-    #status.error { color: #f87171; }
-
-    #pages {
-      padding: 24px 20px;
-      display: flex; flex-direction: column; align-items: center; gap: 24px;
-      overflow-x: auto;
-    }
-
+    #pages { padding: 24px 20px; display: flex; flex-direction: column; align-items: center; gap: 24px; overflow-x: auto; }
     .page-container { display: flex; flex-direction: column; align-items: center; }
     .page-label { font-size: 11px; color: #64748b; margin-bottom: 6px; }
-    .page-wrap { position: relative; box-shadow: 0 4px 24px rgba(0,0,0,.7); border-radius: 2px; overflow: hidden; }
+    .page-wrap {
+      position: relative; border-radius: 2px; overflow: hidden;
+      box-shadow: 0 4px 24px rgba(0,0,0,.7);
+      background: #fff;
+    }
     canvas { display: block; }
     .overlay { position: absolute; top: 0; left: 0; pointer-events: none; }
-
     .toast {
       position: fixed; bottom: 20px; right: 20px;
       background: #34d399; color: #052e16;
@@ -40,11 +34,6 @@
       font-weight: 600; font-size: 13px;
       box-shadow: 0 4px 20px rgba(0,0,0,.5);
       animation: fadeout 0.4s 2.8s ease-out forwards;
-    }
-    .warn {
-      position: fixed; bottom: 20px; right: 20px;
-      background: rgba(248,113,113,.12); border: 1px solid rgba(248,113,113,.35);
-      color: #f87171; padding: 10px 16px; border-radius: 8px; font-size: 12px; max-width: 300px;
     }
     @keyframes fadeout { to { opacity: 0; transform: translateY(6px); } }
   </style>
@@ -64,40 +53,119 @@
   pdfjsLib.GlobalWorkerOptions.workerSrc =
     'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 
-  const params = new URLSearchParams(location.search);
-  const chunkText = params.get('text') || '';
-  const chunkIdx  = params.get('chunk') || '';
+  const params   = new URLSearchParams(location.search);
+  const chunkIdx = params.get('chunk') || '';
 
   if (chunkIdx) document.getElementById('chunk-id').textContent = `Chunk ${chunkIdx}`;
 
-  // Normalise: lowercase + collapse whitespace (length-preserving enough for index mapping)
-  const norm = s => s.toLowerCase().replace(/\s+/g, ' ');
-  const queryNorm = norm(chunkText).trim().slice(0, 150);
+  // Normalise for text matching: strip non-alpha, collapse spaces.
+  const normAlpha = s => s.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+  const wordCount = s => (s.match(/\S+/g) || []).length;
 
-  // Significant words for fallback matching (≥5 chars)
-  const sigWords = norm(chunkText).match(/\b[a-z]{5,}\b/g)?.slice(0, 8) || [];
+  // Draw yellow highlight rectangles over matching text items.
+  function highlightItems(items, from, to, ctx, vp, scale) {
+    ctx.fillStyle = 'rgba(251,191,36,0.4)';
+    let pos = 0;
+    for (const item of items) {
+      const a = normAlpha(item.str || '');
+      const start = pos;
+      const end   = pos + a.length;
+      pos = end + 1; // +1 for separator space
+      if (end <= from || start >= to) continue;
+      if (!item.width || !item.str?.trim()) continue;
+      const [cx, cy] = pdfjsLib.Util.applyTransform(
+        [item.transform[4], item.transform[5]], vp.transform
+      );
+      const h = (item.height || 12) * scale;
+      ctx.fillRect(cx - 1, cy - h - 1, item.width * scale + 2, h + 4);
+    }
+  }
+
+  // Strategy 2: word-sequence — robust to symbol/math extraction differences.
+  function highlightByWords(items, anchors, chunkWC, ctx, vp, scale) {
+    if (anchors.length < 3) return false;
+    let wIdx = 0, firstItem = -1;
+    for (let i = 0; i < items.length; i++) {
+      for (const w of normAlpha(items[i].str || '').split(' ').filter(Boolean)) {
+        if (w === anchors[wIdx]) {
+          if (firstItem === -1) firstItem = i;
+          if (++wIdx >= anchors.length) break;
+        }
+      }
+      if (wIdx >= anchors.length) break;
+    }
+    if (firstItem === -1) return false;
+    ctx.fillStyle = 'rgba(251,191,36,0.4)';
+    let painted = 0;
+    for (let i = firstItem; i < items.length && painted < chunkWC * 1.3; i++) {
+      const item = items[i];
+      if (!item.width || !item.str?.trim()) continue;
+      painted += wordCount(item.str);
+      const [cx, cy] = pdfjsLib.Util.applyTransform(
+        [item.transform[4], item.transform[5]], vp.transform
+      );
+      const h = (item.height || 12) * scale;
+      ctx.fillRect(cx - 1, cy - h - 1, item.width * scale + 2, h + 4);
+    }
+    return true;
+  }
+
+  async function tryHighlight(pageObj, vp, scale, overlay, fullText) {
+    const tc      = await pageObj.getTextContent();
+    const items   = tc.items;
+    const anchors = normAlpha(fullText).split(' ').filter(w => w.length >= 4).slice(0, 10);
+    const chunkWC = wordCount(fullText);
+
+    // Build concatenated alpha text for substring search.
+    let pageAlpha = '';
+    for (const it of items) { pageAlpha += normAlpha(it.str || '') + ' '; }
+    pageAlpha = pageAlpha.trimEnd();
+
+    const searchAnchor = normAlpha(fullText).slice(0, 130);
+    const ctx = overlay.getContext('2d');
+
+    const idx = searchAnchor ? pageAlpha.indexOf(searchAnchor) : -1;
+    if (idx !== -1) {
+      highlightItems(items, idx, idx + normAlpha(fullText).length, ctx, vp, scale);
+      return;
+    }
+    // Fallback: word-sequence (handles math / symbol extraction differences).
+    highlightByWords(items, anchors, chunkWC, ctx, vp, scale);
+  }
 
   async function main() {
     const statusEl = document.getElementById('status');
     const pagesDiv = document.getElementById('pages');
-    let scrollTarget = null;
-    let matchPage   = null;
+
+    // Fetch full chunk text + stored page number from API.
+    let fullText  = '';
+    let targetPg  = null;
+    if (chunkIdx) {
+      try {
+        const r = await fetch(`/doc/chunk/${chunkIdx}`);
+        if (r.ok) {
+          const d  = await r.json();
+          fullText = d.text || '';
+          targetPg = d.page_number || null; // null for docs indexed before this feature
+        }
+      } catch (_) {}
+    }
 
     try {
       const pdf = await pdfjsLib.getDocument('/doc/pdf').promise;
       statusEl.textContent = '';
 
+      // ── Phase 1: create all page placeholders (fast — no canvas rendering) ──
+      const pageData = [];
       for (let n = 1; n <= pdf.numPages; n++) {
-        const page = await pdf.getPage(n);
-
-        // Responsive scale: fit window width with a max of 1.5
+        const page   = await pdf.getPage(n);
         const baseVp = page.getViewport({ scale: 1 });
         const scale  = Math.min(1.5, (window.innerWidth - 48) / baseVp.width);
         const vp     = page.getViewport({ scale });
 
-        // DOM structure
         const container = document.createElement('div');
         container.className = 'page-container';
+
         const label = document.createElement('div');
         label.className = 'page-label';
         label.textContent = `Page ${n} of ${pdf.numPages}`;
@@ -118,77 +186,84 @@
         container.appendChild(wrap);
         pagesDiv.appendChild(container);
 
-        // Render page
-        await page.render({ canvasContext: canvas.getContext('2d'), viewport: vp }).promise;
-
-        // Text search & highlight (only until first match found)
-        if (!scrollTarget && chunkText) {
-          const tc    = await page.getTextContent();
-          const items = tc.items.filter(it => it.str);
-
-          // Build concatenated text and per-item character ranges
-          let pageText = '';
-          const bounds = [];
-          for (const it of items) {
-            bounds.push({ start: pageText.length, end: pageText.length + it.str.length, item: it });
-            pageText += it.str + ' ';
-          }
-
-          const pageNorm = norm(pageText);
-          let matchStart = queryNorm ? pageNorm.indexOf(queryNorm) : -1;
-          let matchEnd   = matchStart !== -1 ? matchStart + queryNorm.length : -1;
-
-          // Fallback: ordered word sequence search
-          if (matchStart === -1 && sigWords.length >= 3) {
-            let pos = 0, startPos = -1;
-            for (const w of sigWords) {
-              const idx = pageNorm.indexOf(w, pos);
-              if (idx === -1) { startPos = -1; break; }
-              if (startPos === -1) startPos = idx;
-              pos = idx + w.length;
-            }
-            if (startPos !== -1) { matchStart = startPos; matchEnd = pos; }
-          }
-
-          if (matchStart !== -1) {
-            scrollTarget = wrap;
-            matchPage    = n;
-
-            // Map normalised match range back to raw positions (ratio approximation)
-            const ratio    = pageText.length / (pageNorm.length || 1);
-            const rawStart = Math.floor(matchStart * ratio);
-            const rawEnd   = Math.ceil(matchEnd * ratio);
-
-            const ctx = overlay.getContext('2d');
-            ctx.fillStyle = 'rgba(251,191,36,0.38)';
-
-            for (const { start, end, item } of bounds) {
-              if (end < rawStart || start > rawEnd) continue;
-              if (!item.width || !item.str.trim()) continue;
-              const tx = item.transform;
-              const [cx, cy] = pdfjsLib.Util.applyTransform([tx[4], tx[5]], vp.transform);
-              const h = (item.height || 12) * scale;
-              const w = item.width * scale;
-              ctx.fillRect(cx - 1, cy - h - 1, w + 2, h + 4);
-            }
-          }
-        }
+        pageData.push({ n, page, vp, scale, wrap, canvas, overlay, rendered: false });
       }
 
-      // Scroll to match and show feedback
-      if (scrollTarget) {
-        scrollTarget.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      // ── Phase 2: lazy-render pages via IntersectionObserver ─────────────────
+      // The full document is always scrollable; only pages entering the viewport
+      // are actually rendered. This keeps memory and CPU low for large PDFs.
+      const renderObs = new IntersectionObserver(entries => {
+        for (const entry of entries) {
+          if (!entry.isIntersecting) continue;
+          const pd = pageData[parseInt(entry.target.dataset.n) - 1];
+          if (pd.rendered) return;
+          pd.rendered = true;
+          renderObs.unobserve(entry.target);
+          pd.page.render({ canvasContext: pd.canvas.getContext('2d'), viewport: pd.vp });
+        }
+      }, { rootMargin: '400px 0px' });
+
+      for (const pd of pageData) {
+        pd.wrap.dataset.n = pd.n;
+        renderObs.observe(pd.wrap);
+      }
+
+      // ── Phase 3: navigate to stored page number (reliable) ──────────────────
+      // page_number is set during ingest by PyMuPDF, so it's always correct.
+      // For legacy docs (indexed before this feature) targetPg is null — fall
+      // back to scanning all pages by text.
+      if (targetPg && pageData[targetPg - 1]) {
+        const pd = pageData[targetPg - 1];
+
+        // Scroll immediately — no text scanning needed.
+        pd.wrap.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+        // Try to highlight the chunk on the known page.
+        if (fullText) await tryHighlight(pd.page, pd.vp, pd.scale, pd.overlay, fullText);
+
         const t = document.createElement('div');
         t.className = 'toast';
-        t.textContent = `Chunk found on page ${matchPage}`;
+        t.textContent = `Chunk found on page ${targetPg}`;
         document.body.appendChild(t);
         setTimeout(() => t.remove(), 3400);
-      } else if (chunkText) {
-        const w = document.createElement('div');
-        w.className = 'warn';
-        w.textContent = 'Could not pinpoint this chunk — text extraction may differ from pdfplumber.';
-        document.body.appendChild(w);
-        setTimeout(() => w.remove(), 6000);
+
+      } else if (fullText) {
+        // ── Legacy fallback: scan pages for text match ───────────────────────
+        let found = false;
+        for (const pd of pageData) {
+          const tc      = await pd.page.getTextContent();
+          const items   = tc.items;
+          const anchors = normAlpha(fullText).split(' ').filter(w => w.length >= 4).slice(0, 10);
+          const chunkWC = wordCount(fullText);
+
+          let pageAlpha = '';
+          for (const it of items) { pageAlpha += normAlpha(it.str || '') + ' '; }
+
+          const searchAnchor = normAlpha(fullText).slice(0, 130);
+          const idx = searchAnchor ? pageAlpha.indexOf(searchAnchor) : -1;
+          const matched = idx !== -1 ||
+            highlightByWords(items, anchors, chunkWC, pd.overlay.getContext('2d'), pd.vp, pd.scale);
+
+          if (idx !== -1) {
+            highlightItems(items, idx, idx + normAlpha(fullText).length,
+              pd.overlay.getContext('2d'), pd.vp, pd.scale);
+          }
+
+          if (matched) {
+            found = true;
+            pd.wrap.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            const t = document.createElement('div');
+            t.className = 'toast';
+            t.textContent = `Chunk found on page ${pd.n}`;
+            document.body.appendChild(t);
+            setTimeout(() => t.remove(), 3400);
+            break;
+          }
+        }
+        if (!found) {
+          // Show first page; user can scroll manually.
+          pageData[0]?.wrap.scrollIntoView({ block: 'start' });
+        }
       }
 
     } catch (err) {
