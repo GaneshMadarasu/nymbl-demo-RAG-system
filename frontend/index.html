@@ -214,7 +214,12 @@
           const statusEl = assistantBubble.querySelector('.rag-status');
           if (statusEl) statusEl.textContent = 'Generating answer…';
         }
-        else if (event.type === 'token') { accumulated += event.text; }
+        else if (event.type === 'token') {
+          accumulated += event.text;
+          assistantBubble.classList.add('rendered');
+          assistantBubble.innerHTML = marked.parse(accumulated, { breaks: false, gfm: true });
+          scrollToBottom();
+        }
         else if (event.type === 'error') { throw new Error(event.message || 'Query failed'); }
         else if (event.type === 'done') {
           await renderFinalAnswer(assistantBubble, accumulated, sources);
