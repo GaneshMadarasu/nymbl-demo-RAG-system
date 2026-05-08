@@ -110,6 +110,34 @@
     return true;
   }
 
+  // Highlight chunk continuation on page N+1: search for the tail of the chunk
+  // text and highlight from the top of the page down to where the chunk ends.
+  async function tryHighlightTail(pageObj, vp, scale, overlay, fullText) {
+    const tc = await pageObj.getTextContent();
+    const items = tc.items;
+    const fullNorm = normAlpha(fullText);
+
+    let pageAlpha = '';
+    for (const it of items) { pageAlpha += normAlpha(it.str || '') + ' '; }
+
+    const ctx = overlay.getContext('2d');
+
+    // Try anchors from the last 75%, 50%, and 25% of the chunk to locate the
+    // page-break boundary and find where the chunk ends on this page.
+    for (const frac of [0.75, 0.5, 0.25]) {
+      const tailStart = Math.floor(fullNorm.length * frac);
+      const anchor = fullNorm.slice(tailStart, tailStart + 80);
+      if (!anchor || anchor.length < 20) continue;
+      const pos = pageAlpha.indexOf(anchor);
+      if (pos !== -1) {
+        const endPos = pos + (fullNorm.length - tailStart);
+        highlightItems(items, 0, endPos, ctx, vp, scale);
+        return true;
+      }
+    }
+    return false;
+  }
+
   async function tryHighlight(pageObj, vp, scale, overlay, fullText) {
     const tc      = await pageObj.getTextContent();
     const items   = tc.items;
@@ -218,8 +246,13 @@
         // Scroll immediately — no text scanning needed.
         pd.wrap.scrollIntoView({ behavior: 'smooth', block: 'center' });
 
-        // Try to highlight the chunk on the known page.
-        if (fullText) await tryHighlight(pd.page, pd.vp, pd.scale, pd.overlay, fullText);
+        // Highlight the chunk on the known page, then check the next page for
+        // any continuation (chunks that straddle a page boundary).
+        if (fullText) {
+          await tryHighlight(pd.page, pd.vp, pd.scale, pd.overlay, fullText);
+          const nextPd = pageData[targetPg]; // targetPg is 1-indexed; [targetPg] = page N+1
+          if (nextPd) await tryHighlightTail(nextPd.page, nextPd.vp, nextPd.scale, nextPd.overlay, fullText);
+        }
 
         const t = document.createElement('div');
         t.className = 'toast';
