@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>DocRAG</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/9.1.6/marked.min.js"></script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     :root {
@@ -40,6 +41,13 @@
     .msg.user { align-self: flex-end; align-items: flex-end; }
     .msg.assistant { align-self: flex-start; align-items: flex-start; }
     .bubble { padding: 10px 14px; border-radius: var(--radius); line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
+    .bubble.rendered { white-space: normal; }
+    .bubble.rendered p { margin-bottom: 8px; }
+    .bubble.rendered p:last-child { margin-bottom: 0; }
+    .bubble.rendered ul, .bubble.rendered ol { padding-left: 20px; margin-bottom: 8px; }
+    .bubble.rendered li { margin-bottom: 4px; }
+    .bubble.rendered strong { color: #c7d2fe; }
+    .bubble.rendered code { background: rgba(255,255,255,.08); padding: 1px 5px; border-radius: 3px; font-family: monospace; font-size: 12px; }
     .msg.user .bubble { background: var(--user-bubble); color: var(--muted); }
     .msg.assistant .bubble { background: var(--bubble); border-left: 3px solid var(--accent); }
     .citations { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
@@ -236,14 +244,17 @@
   });
 
   function renderFinalAnswer(bubble, text, chunks) {
-    const escaped = text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-    const withPills = escaped.replace(/\[[^\]]*Chunk\s+\d+[^\]]*\]/g, match => {
+    // Parse markdown → HTML, then replace [Chunk N] citations with pill elements.
+    const markdownHtml = marked.parse(text, { breaks: false, gfm: true });
+    const withPills = markdownHtml.replace(/\[[^\]]*Chunk\s+\d+[^\]]*\]/g, match => {
       const nums = [...match.matchAll(/Chunk\s+(\d+)/g)].map(m => m[1]);
+      if (!nums.length) return match;
       return nums.map(n => {
         const chunk = chunks.find(c => c.chunk_index === parseInt(n));
         return makePill(n, chunk ? chunk.text : '', chunk ? chunk.similarity : null);
       }).join(' ');
     });
+    bubble.classList.add('rendered');
     bubble.innerHTML = withPills;
     const unknownAnswer = text.trim().toLowerCase().startsWith("i don't know");
     if (chunks.length > 0 && !unknownAnswer) {
