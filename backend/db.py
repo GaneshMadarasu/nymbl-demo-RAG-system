@@ -171,8 +171,13 @@ async def get_chunk_text(
 
 async def doc_exists(pool: asyncpg.Pool, doc_id: str) -> bool:
     async with pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT 1 FROM doc_meta WHERE doc_id = $1", doc_id)
-    return row is not None
+        meta = await conn.fetchrow("SELECT 1 FROM doc_meta WHERE doc_id = $1", doc_id)
+        if not meta:
+            return False
+        chunks = await conn.fetchrow(
+            "SELECT 1 FROM chunks WHERE doc_id = $1 LIMIT 1", doc_id
+        )
+    return chunks is not None
 
 
 async def upsert_doc_meta(
@@ -191,7 +196,6 @@ async def upsert_doc_meta(
 async def clear_all_chunks(pool: asyncpg.Pool) -> None:
     async with pool.acquire() as conn:
         await conn.execute("TRUNCATE TABLE chunks RESTART IDENTITY")
-        await conn.execute("TRUNCATE TABLE doc_meta")
 
 
 async def get_doc_info(pool: asyncpg.Pool, doc_id: str) -> dict | None:

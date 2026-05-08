@@ -9,10 +9,13 @@ Single-document RAG system: upload a PDF, ask questions, get grounded answers wi
 | PDF extraction | PyMuPDF (`fitz`) |
 | Embeddings | `gemini-embedding-2` (768-dim) |
 | Chunking | tiktoken-aware sentence-boundary splitter |
+| Retrieval | Hybrid search — pgvector HNSW (dense) + `tsvector` BM25 (sparse), fused via RRF |
+| Re-ranking | Gemini 2.0 Flash Lite (lightweight model, orders retrieved chunks before answering) |
 | Answering | Gemini 2.5 Flash (streamed) |
 | Vector store | Postgres 16 + pgvector (HNSW) |
 | Backend | FastAPI + asyncpg |
 | Frontend | Single-file HTML/CSS/JS |
+| Logging | Python `logging` — console + rotating file (`logs/app.log`, 5 MB × 3 backups) |
 
 ## Setup
 
@@ -32,7 +35,7 @@ cp .env.example .env
 ### 3. Start the database
 
 ```bash
-docker compose up -d
+make db
 ```
 
 Wait ~10 seconds for the health check to pass: `docker compose ps` should show `db` as `healthy`.
@@ -40,16 +43,29 @@ Wait ~10 seconds for the health check to pass: `docker compose ps` should show `
 ### 4. Install Python dependencies
 
 ```bash
-pip install -r requirements.txt
+make setup
 ```
 
 ### 5. Run
 
 ```bash
-uvicorn backend.main:app --reload
+make dev
 ```
 
 Open **http://localhost:8000** in your browser.
+
+## Common commands
+
+| Command | Description |
+|---------|-------------|
+| `make setup` | Copy `.env.example` and install dependencies |
+| `make db` | Start Postgres via Docker Compose |
+| `make dev` | Run the FastAPI server with auto-reload |
+| `make test` | Run the test suite |
+| `make logs` | Tail `logs/app.log` live |
+| `make clean` | Remove `__pycache__`, `.pytest_cache`, and `logs/` |
+| `make reset` | Restart the database (stop + start) |
+| `make stop` | Stop Docker Compose |
 
 ## Usage
 
@@ -65,7 +81,7 @@ If the document doesn't contain enough information to answer, the system respond
 > Requires the Docker Compose database to be running.
 
 ```bash
-pytest -v
+make test
 ```
 
 ## Design decisions
@@ -96,3 +112,18 @@ Embedding large documents concurrently hits rate limits. Retries use exponential
 
 **Single HTML file frontend**
 No build tools, no Node.js, no npm. The UI is served directly by FastAPI, so setup is a single `uvicorn` command.
+
+**Hybrid search (dense + sparse, RRF fusion)**
+Vector similarity alone misses exact keyword matches — a query for a specific model number or proper noun may rank semantically similar but wrong chunks higher. Combining pgvector cosine search (dense) with Postgres `tsvector` BM25 ranking (sparse) and fusing results via Reciprocal Rank Fusion gives better coverage across both semantic and lexical queries.
+
+**Two-model re-ranking pipeline**
+Retrieved chunks are re-ordered by a lightweight model (`gemini-2.0-flash-lite`) before the top half are passed to the answering model (`gemini-2.5-flash`). Using a smaller model for ranking keeps latency low — ranking is a simple ordering task that doesn't need the full capability of the answering model — while still improving the quality of context the answering model receives.
+
+**Ingest deduplication / skip re-embedding**
+Each uploaded PDF is identified by a SHA-256 hash of its bytes. If the same file is re-uploaded while its chunks are still in the database, the embedding step is skipped entirely and the cached result is returned immediately. `doc_meta` is preserved across uploads so the hash can be checked even after the chunks table is cleared for a new document; the skip only fires when both the metadata record and the actual chunks are present.
+
+**Normalised error responses**
+All HTTP errors return `{"error": "plain English message"}` via a global FastAPI exception handler. The same key is used for streaming ingest errors. Every error is also logged as a warning with method, path, status code, and message so failures are traceable in `logs/app.log` without exposing tracebacks to the client.
+
+**Rotating file logging**
+Logs write to both the console and `logs/app.log`. The file handler rotates at 5 MB and keeps three backups, preventing unbounded disk growth during long-running demo sessions.

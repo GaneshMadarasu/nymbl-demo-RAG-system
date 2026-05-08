@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 _client = genai.Client(api_key=settings.gemini_api_key)
 
 _GEN_MODEL = "gemini-2.5-flash"
+_RERANK_MODEL = "gemini-2.0-flash-lite"
 _EMBED_MODEL = "gemini-embedding-2"
 _EMBED_DIM = 768
 
@@ -75,7 +76,9 @@ async def _rerank(question: str, chunks: list[dict], top_n: int) -> list[dict]:
         f"Question: {question}\n\nChunks:\n{snippets}"
     )
     try:
-        r = await _client.aio.models.generate_content(model=_GEN_MODEL, contents=prompt)
+        r = await _client.aio.models.generate_content(
+            model=_RERANK_MODEL, contents=prompt
+        )
         match = re.search(r"\[[\d,\s]+\]", r.text or "")
         if not match:
             return chunks[:top_n]
