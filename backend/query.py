@@ -160,10 +160,15 @@ async def run_query(
     history = history or []
     pool = await db.get_pool()
 
+    if history and _PRONOUN_RE.search(question):
+        yield {"type": "status", "text": "Rewriting query…"}
     retrieval_question = await _rewrite_query(question, history)
 
+    yield {"type": "status", "text": "Embedding query…"}
     t0 = time.monotonic()
     query_emb = await _embed_query(retrieval_question)
+
+    yield {"type": "status", "text": "Searching database…"}
     raw_chunks = await db.search_chunks(
         pool, doc_id, query_emb, question=retrieval_question, k=k
     )
@@ -184,6 +189,7 @@ async def run_query(
         yield {"type": "done"}
         return
 
+    yield {"type": "status", "text": "Re-ranking results…"}
     rerank_top = max(1, (k * 3) // 4)
     t_rerank = time.monotonic()
     chunks = await _rerank(question, raw_chunks, top_n=rerank_top)
