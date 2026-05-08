@@ -14,7 +14,7 @@ Single-document RAG system: upload a PDF, ask questions, get grounded answers wi
 | Answering | Gemini 2.5 Flash (streamed) |
 | Vector store | Postgres 16 + pgvector (HNSW) |
 | Backend | FastAPI + asyncpg |
-| Frontend | Single-file HTML/CSS/JS |
+| Frontend | Single-file HTML/CSS/JS + PDF viewer with chunk highlighting |
 | Logging | Python `logging` — console + rotating file (`logs/app.log`, 5 MB × 3 backups) |
 
 ## Setup
@@ -72,7 +72,7 @@ Open **http://localhost:8000** in your browser.
 1. Drag a PDF onto the sidebar or click to upload
 2. Wait for the ingestion progress bar to complete
 3. Type a question and press Enter or click →
-4. The answer streams back with `§ Chunk N` citation pills — hover for raw text
+4. The answer streams back with `§ Chunk N` citation pills — hover for a text preview, click to open the PDF viewer with the chunk highlighted in yellow
 
 If the document doesn't contain enough information to answer, the system responds: *"I don't know."*
 
@@ -127,3 +127,9 @@ All HTTP errors return `{"error": "plain English message"}` via a global FastAPI
 
 **Rotating file logging**
 Logs write to both the console and `logs/app.log`. The file handler rotates at 5 MB and keeps three backups, preventing unbounded disk growth during long-running demo sessions.
+
+**PDF viewer with chunk highlighting**
+Clicking a citation pill opens a separate viewer page (`/viewer`) that renders the full document via PDF.js and highlights the cited chunk in yellow. The chunk's page number is stored in the database at ingest time (by scanning each PDF page with PyMuPDF and matching the chunk text), so the viewer navigates directly to the right page rather than scanning the whole document at query time.
+
+**Cross-page chunk highlighting**
+A single chunk can span two PDF pages. The viewer highlights up to three pages: the stored page (always), the page before it (in case the chunk's real start is there due to math-heavy openings that confuse the page-finder), and the page after (in case the chunk spills over). Each direction uses a different strategy: the target page uses substring anchors then word-sequence matching; the preceding page searches for the chunk start working forward; the following page anchors from the chunk's end working backward, with a `localAnchors` fallback that finds words present in both the chunk text and the page text. This fallback is necessary because PyMuPDF (used at ingest) and PDF.js (used in the browser) extract math and symbols differently, so normalized forms can diverge — shared plain-English words are always reliable anchors regardless of extraction differences.
