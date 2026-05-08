@@ -261,19 +261,22 @@
   });
 
   async function renderFinalAnswer(bubble, text, chunks) {
-    // Map chunk_index → sequential citation number in order of first appearance.
+    // chunks entries have { position (1-N), chunk_index, text, similarity, rrf_score, page_number }.
+    // The model is given [Chunk 1]..[Chunk N] labels, so `position` is what appears in its output.
+    // Map position → sequential display citation number in order of first appearance.
     const citationMap = new Map();
     let citeCounter = 0;
 
     const markdownHtml = marked.parse(text, { breaks: false, gfm: true });
     const withCites = markdownHtml.replace(/\[[^\]]*Chunk\s+\d+[^\]]*\]/g, match => {
-      const nums = [...match.matchAll(/Chunk\s+(\d+)/g)].map(m => parseInt(m[1]));
-      if (!nums.length) return match;
-      return nums.map(n => {
-        if (!citationMap.has(n)) citationMap.set(n, ++citeCounter);
-        const num = citationMap.get(n);
-        const chunk = chunks.find(c => c.chunk_index === n);
-        return `<span class="cite-badge" data-chunk="${n}" data-text="${escapeHtml(chunk ? chunk.text : '')}" title="Click to open in document">[${num}]</span>`;
+      const positions = [...match.matchAll(/Chunk\s+(\d+)/g)].map(m => parseInt(m[1]));
+      if (!positions.length) return match;
+      return positions.map(pos => {
+        const chunk = chunks.find(c => c.position === pos);
+        if (!chunk) return '';   // position outside 1..k → hallucinated, suppress
+        if (!citationMap.has(pos)) citationMap.set(pos, ++citeCounter);
+        const num = citationMap.get(pos);
+        return `<span class="cite-badge" data-chunk="${chunk.chunk_index}" data-text="${escapeHtml(chunk.text)}" title="Click to open in document">[${num}]</span>`;
       }).join('');
     });
 
@@ -283,36 +286,28 @@
     const unknownAnswer = text.trim().toLowerCase().startsWith("i don't know");
     if (citationMap.size === 0 || unknownAnswer) { scrollToBottom(); return; }
 
-    // Fetch data for any cited chunks not present in the sources event.
-    const allChunks = [...chunks];
-    const missingIdxs = [...citationMap.keys()].filter(idx => !allChunks.find(c => c.chunk_index === idx));
-    if (missingIdxs.length) {
-      const fetched = await Promise.all(missingIdxs.map(async idx => {
-        try {
-          const r = await fetch(`/doc/chunk/${idx}`);
-          if (!r.ok) return null;
-          const d = await r.json();
-          return { chunk_index: idx, text: d.text || '', similarity: null, page_number: d.page_number || null };
-        } catch { return null; }
-      }));
-      fetched.forEach(c => { if (c) allChunks.push(c); });
-    }
-
     const cites = document.createElement('div'); cites.className = 'citations';
     const header = document.createElement('div'); header.className = 'citations-header';
     header.textContent = 'References';
     cites.appendChild(header);
 
+    const maxRrf = Math.max(...chunks.map(c => c.rrf_score || 0), 1e-9);
     const orderedEntries = [...citationMap.entries()].sort((a, b) => a[1] - b[1]);
-    orderedEntries.forEach(([chunkIdx, num]) => {
-      const chunk = allChunks.find(c => c.chunk_index === chunkIdx);
+    orderedEntries.forEach(([pos, num]) => {
+      const chunk = chunks.find(c => c.position === pos);
+      if (!chunk) return;
       const ref = document.createElement('div'); ref.className = 'citation-ref';
-      const pageHeading = chunk?.page_number ? `<div class="ref-page-heading">Page ${chunk.page_number}</div>` : '';
-      const pct = chunk?.similarity ? Math.round(chunk.similarity * 100) : 0;
+      const pageHeading = chunk.page_number ? `<div class="ref-page-heading">Page ${chunk.page_number}</div>` : '';
+      // Use cosine sim for semantic matches; RRF-relative % for BM25-only (similarity === 0).
+      const pct = (chunk.similarity > 0)
+        ? Math.round(chunk.similarity * 100)
+        : (chunk.rrf_score > 0)
+        ? Math.round(chunk.rrf_score / maxRrf * 100)
+        : 0;
       const cls = pct >= 75 ? 'sim-high' : pct >= 50 ? 'sim-mid' : 'sim-low';
       const sim = pct ? `<span class="pill-sim ${cls}">${pct}%</span>` : '';
-      const tip = chunk?.text ? `<span class="tooltip">${escapeHtml(chunk.text)}</span>` : '';
-      ref.innerHTML = `<span class="ref-num">[${num}]</span><div class="ref-body">${pageHeading}<span class="pill" data-chunk="${chunkIdx}" data-text="${escapeHtml(chunk?.text || '')}" title="Click to open in document">§ ${chunkIdx}${sim}${tip}</span></div>`;
+      const tip = chunk.text ? `<span class="tooltip">${escapeHtml(chunk.text)}</span>` : '';
+      ref.innerHTML = `<span class="ref-num">[${num}]</span><div class="ref-body">${pageHeading}<span class="pill" data-chunk="${chunk.chunk_index}" data-text="${escapeHtml(chunk.text)}" title="Click to open in document">§ ${chunk.chunk_index}${sim}${tip}</span></div>`;
       cites.appendChild(ref);
     });
 

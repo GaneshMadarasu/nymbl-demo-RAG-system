@@ -28,7 +28,8 @@ SYSTEM_PROMPT = (
     "For detailed questions, cover all relevant points fully, include examples and steps from the context, "
     "and use markdown headings, bullet lists, and bold text to structure long answers.\n"
     "If the context doesn't contain enough information, respond with exactly: \"I don't know.\"\n"
-    "Cite sources as [Chunk N] inline throughout your answer whenever you use information from that chunk."
+    "Cite sources as [Chunk N] inline throughout your answer whenever you use information from that chunk. "
+    "Only cite the exact [Chunk N] numbers listed in the Context section. Never invent or interpolate chunk numbers."
 )
 
 _MAX_RETRIES = 6
@@ -136,9 +137,10 @@ _CHUNK_REF_RE = re.compile(r"\[Chunk\s+\d+\]", re.I)
 
 
 def build_prompt(question: str, chunks: list[dict], history: list[dict]) -> str:
+    # Use sequential 1-N labels so the model can't cite out-of-range DB indexes.
     context = "\n".join(
-        f'[Chunk {r["chunk_index"]}]: "{r.get("parent_text") or r["text"]}"'
-        for r in chunks
+        f'[Chunk {i + 1}]: "{r.get("parent_text") or r["text"]}"'
+        for i, r in enumerate(chunks)
     )
     history_section = ""
     if history:
@@ -196,12 +198,14 @@ async def run_query(
         "type": "sources",
         "chunks": [
             {
+                "position": i + 1,  # matches [Chunk N] in the prompt (1-indexed)
                 "chunk_index": c["chunk_index"],
                 "text": c["text"],
                 "similarity": round(float(c["similarity"]), 3),
+                "rrf_score": round(float(c["rrf_score"]), 6),
                 "page_number": c.get("page_number"),
             }
-            for c in chunks
+            for i, c in enumerate(chunks)
         ],
     }
 
