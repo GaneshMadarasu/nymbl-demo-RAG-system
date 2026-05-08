@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 _client = genai.Client(api_key=settings.gemini_api_key)
 
 _GEN_MODEL = "gemini-2.5-flash"
-_RERANK_MODEL = "gemini-2.0-flash-lite"
+_RERANK_MODEL = "gemini-2.0-flash"
 _EMBED_MODEL = "gemini-embedding-2"
 _EMBED_DIM = 768
 
