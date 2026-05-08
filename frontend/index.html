@@ -201,7 +201,6 @@
     const assistantBubble = appendAssistantMessage();
     let accumulated = '';
     let sources = [];
-    let firstToken = true;
     try {
       const res = await fetch('/query', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question: q, history: conversationHistory }) });
       if (!res.ok) { const err = await res.json(); throw new Error(err.detail || 'Query failed'); }
@@ -210,11 +209,12 @@
           const statusEl = assistantBubble.querySelector('.rag-status');
           if (statusEl) statusEl.textContent = event.text;
         }
-        else if (event.type === 'sources') { sources = event.chunks; }
-        else if (event.type === 'token') {
-          if (firstToken) { firstToken = false; assistantBubble.innerHTML = ''; }
-          accumulated += event.text; assistantBubble.textContent = accumulated;
+        else if (event.type === 'sources') {
+          sources = event.chunks;
+          const statusEl = assistantBubble.querySelector('.rag-status');
+          if (statusEl) statusEl.textContent = 'Generating answer…';
         }
+        else if (event.type === 'token') { accumulated += event.text; }
         else if (event.type === 'error') { throw new Error(event.message || 'Query failed'); }
         else if (event.type === 'done') {
           await renderFinalAnswer(assistantBubble, accumulated, sources);
