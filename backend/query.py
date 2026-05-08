@@ -1,5 +1,4 @@
 import asyncio
-import json
 import logging
 import re
 import time
@@ -16,7 +15,6 @@ logger = logging.getLogger(__name__)
 _client = genai.Client(api_key=settings.gemini_api_key)
 
 _GEN_MODEL = "gemini-2.5-flash"
-_RERANK_MODEL = "gemini-2.5-flash"
 _EMBED_MODEL = "gemini-embedding-2"
 _EMBED_DIM = 768
 
@@ -67,39 +65,6 @@ async def _embed_query(text: str) -> list[float]:
                 await asyncio.sleep(wait)
                 continue
             raise
-
-
-async def _rerank(question: str, chunks: list[dict], top_n: int) -> list[dict]:
-    """Ask Gemini to re-rank chunks by relevance; falls back to original order on failure."""
-    if len(chunks) <= top_n:
-        return chunks
-    snippets = "\n\n".join(f"[{i}]: {c['text'][:400]}" for i, c in enumerate(chunks))
-    prompt = (
-        "Rank these text chunks by relevance to the question. "
-        "Return ONLY a JSON array of indices, most relevant first, e.g. [2,0,1].\n\n"
-        f"Question: {question}\n\nChunks:\n{snippets}"
-    )
-    try:
-        r = await _client.aio.models.generate_content(
-            model=_RERANK_MODEL, contents=prompt
-        )
-        match = re.search(r"\[[\d,\s]+\]", r.text or "")
-        if not match:
-            return chunks[:top_n]
-        indices = json.loads(match.group())
-        seen: set[int] = set()
-        result: list[dict] = []
-        for i in indices:
-            if isinstance(i, int) and 0 <= i < len(chunks) and i not in seen:
-                result.append(chunks[i])
-                seen.add(i)
-        for i, c in enumerate(chunks):
-            if i not in seen:
-                result.append(c)
-        return result[:top_n]
-    except Exception as exc:
-        logger.warning("Re-ranking failed (%s); using retrieval order", exc)
-        return chunks[:top_n]
 
 
 _PRONOUN_RE = re.compile(
@@ -189,17 +154,6 @@ async def run_query(
         yield {"type": "done"}
         return
 
-    yield {"type": "status", "text": "Re-ranking results…"}
-    rerank_top = max(1, (k * 3) // 4)
-    t_rerank = time.monotonic()
-    chunks = await _rerank(question, raw_chunks, top_n=rerank_top)
-    logger.info(
-        "Re-ranking took %.2fs — kept %d/%d chunks",
-        time.monotonic() - t_rerank,
-        len(chunks),
-        len(raw_chunks),
-    )
-
     yield {
         "type": "sources",
         "chunks": [
@@ -211,11 +165,11 @@ async def run_query(
                 "rrf_score": round(float(c["rrf_score"]), 6),
                 "page_number": c.get("page_number"),
             }
-            for i, c in enumerate(chunks)
+            for i, c in enumerate(raw_chunks)
         ],
     }
 
-    prompt = build_prompt(question, chunks, history)
+    prompt = build_prompt(question, raw_chunks, history)
 
     t0 = time.monotonic()
     async for chunk in await _client.aio.models.generate_content_stream(

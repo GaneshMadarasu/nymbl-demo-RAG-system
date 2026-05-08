@@ -10,7 +10,7 @@ Single-document RAG system built for the Nymbl technical assessment: upload a PD
 | Embeddings | `gemini-embedding-2` (768-dim) |
 | Chunking | tiktoken-aware sentence-boundary splitter |
 | Retrieval | Hybrid search — pgvector HNSW (dense) + `tsvector` BM25 (sparse), fused via RRF |
-| Re-ranking | Gemini 2.5 Flash (same model as answering, orders retrieved chunks before answering) |
+| Re-ranking | Removed — hybrid RRF retrieval quality made it redundant (see Design decisions) |
 | Answering | Gemini 2.5 Flash (streamed) |
 | Vector store | Postgres 16 + pgvector (HNSW) |
 | Backend | FastAPI + asyncpg |
@@ -116,8 +116,8 @@ No build tools, no Node.js, no npm. The UI is served directly by FastAPI, so set
 **Hybrid search (dense + sparse, RRF fusion)**
 Vector similarity alone misses exact keyword matches — a query for a specific model number or proper noun may rank semantically similar but wrong chunks higher. Combining pgvector cosine search (dense) with Postgres `tsvector` BM25 ranking (sparse) and fusing results via Reciprocal Rank Fusion gives better coverage across both semantic and lexical queries.
 
-**Two-model re-ranking pipeline**
-Retrieved chunks are re-ordered by `gemini-2.5-flash` before the top half are passed to the same model for answering. Using a smaller model for ranking keeps latency low — ranking is a simple ordering task that doesn't need the full capability of the answering model — while still improving the quality of context the answering model receives.
+**Re-ranking removed — hybrid RRF retrieval is sufficient**
+An LLM re-ranking step was originally included (Gemini 2.5 Flash re-ordering the top-k chunks before answering). It was removed because: (1) the hybrid dense + BM25 + RRF retrieval already produces well-ordered results, so re-ranking only dropped 2 of 8 chunks with marginal quality gain; (2) each re-rank call added a full synchronous Gemini round-trip to every query, making it the dominant source of latency; (3) for a single-document Q&A demo, the answering model receives enough context from the top-k RRF results without a separate ordering pass.
 
 **Ingest deduplication / skip re-embedding**
 Each uploaded PDF is identified by a SHA-256 hash of its bytes. If the same file is re-uploaded while its chunks are still in the database, the embedding step is skipped entirely and the cached result is returned immediately. `doc_meta` is preserved across uploads so the hash can be checked even after the chunks table is cleared for a new document; the skip only fires when both the metadata record and the actual chunks are present.
