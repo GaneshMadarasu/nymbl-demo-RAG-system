@@ -1,6 +1,6 @@
-# DocRAG
+# NYMBL — DocRAG
 
-Single-document RAG system: upload a PDF, ask questions, get grounded answers with citations.
+Single-document RAG system built for the Nymbl technical assessment: upload a PDF, ask questions, get grounded answers with numbered citations and a built-in PDF viewer.
 
 ## Stack
 
@@ -14,7 +14,7 @@ Single-document RAG system: upload a PDF, ask questions, get grounded answers wi
 | Answering | Gemini 2.5 Flash (streamed) |
 | Vector store | Postgres 16 + pgvector (HNSW) |
 | Backend | FastAPI + asyncpg |
-| Frontend | Single-file HTML/CSS/JS + PDF viewer with chunk highlighting |
+| Frontend | Single-file HTML/CSS/JS + PDF viewer with chunk highlighting (Nymbl light-mode design) |
 | Logging | Python `logging` — console + rotating file (`logs/app.log`, 5 MB × 3 backups) |
 
 ## Setup
