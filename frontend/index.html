@@ -147,7 +147,7 @@
       let ingestError = null;
       await readSSE(res, event => {
         if (event.status === 'error') {
-          ingestError = event.message || 'Ingest failed';
+          ingestError = event.error || event.message || 'Ingest failed';
         } else if (event.status === 'done') {
           currentDoc = { name: file.name, chunkCount: event.chunk_count, docId: event.doc_id };
           showDocCard(file.name, event.chunk_count);
@@ -243,7 +243,8 @@
       return makePill(n, chunk ? chunk.text : '', chunk ? chunk.similarity : null);
     });
     bubble.innerHTML = withPills;
-    if (chunks.length > 0) {
+    const unknownAnswer = text.trim().toLowerCase().startsWith("i don't know");
+    if (chunks.length > 0 && !unknownAnswer) {
       const cites = document.createElement('div'); cites.className = 'citations';
       const seen = new Set();
       chunks.forEach(c => {

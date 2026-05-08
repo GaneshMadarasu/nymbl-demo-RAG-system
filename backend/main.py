@@ -1,18 +1,30 @@
 import json
 import logging
+import logging.handlers
 import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from backend import db, ingest, query
 
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+_LOG_DIR = Path(__file__).parent.parent / "logs"
+_LOG_DIR.mkdir(exist_ok=True)
+
+_fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+_file_handler = logging.handlers.RotatingFileHandler(
+    _LOG_DIR / "app.log", maxBytes=5 * 1024 * 1024, backupCount=3
 )
+_file_handler.setFormatter(_fmt)
+
+_console_handler = logging.StreamHandler()
+_console_handler.setFormatter(_fmt)
+
+logging.basicConfig(level=logging.INFO, handlers=[_console_handler, _file_handler])
 logger = logging.getLogger(__name__)
 
 FRONTEND = Path(__file__).parent.parent / "frontend" / "index.html"
@@ -45,6 +57,14 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="DocRAG", lifespan=lifespan)
 
 
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
+    logger.warning(
+        "%s %s → %d %s", request.method, request.url.path, exc.status_code, exc.detail
+    )
+    return JSONResponse(status_code=exc.status_code, content={"error": exc.detail})
+
+
 @app.get("/")
 async def serve_frontend() -> FileResponse:
     return FileResponse(FRONTEND)
@@ -67,6 +87,17 @@ async def serve_pdf() -> FileResponse:
     return FileResponse(
         _PDF_PATH, media_type="application/pdf", filename="document.pdf"
     )
+
+
+@app.get("/doc/chunk/{chunk_index}")
+async def get_chunk(chunk_index: int) -> dict:
+    if not _state["doc_id"]:
+        raise HTTPException(status_code=404, detail="No document loaded.")
+    pool = await db.get_pool()
+    result = await db.get_chunk_text(pool, _state["doc_id"], chunk_index)
+    if not result:
+        raise HTTPException(status_code=404, detail=f"Chunk {chunk_index} not found.")
+    return result
 
 
 @app.get("/health")
@@ -111,7 +142,7 @@ async def ingest_pdf(file: UploadFile = File(...)) -> StreamingResponse:
                 yield f"data: {json.dumps(event)}\n\n"
         except Exception as exc:
             logger.exception("Ingest failed")
-            yield f"data: {json.dumps({'status': 'error', 'message': str(exc)})}\n\n"
+            yield f"data: {json.dumps({'status': 'error', 'error': str(exc)})}\n\n"
 
     return StreamingResponse(stream(), media_type="text/event-stream")
 
