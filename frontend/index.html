@@ -49,7 +49,7 @@
     .sim-high { background: rgba(52,211,153,.2); color: #34d399; }
     .sim-mid  { background: rgba(251,191,36,.2);  color: #fbbf24; }
     .sim-low  { background: rgba(248,113,113,.2); color: #f87171; }
-    .tooltip { display: none; position: absolute; bottom: calc(100% + 6px); left: 50%; transform: translateX(-50%); background: #1e1e42; border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; font-size: 11px; color: var(--text); line-height: 1.5; width: 280px; white-space: normal; z-index: 10; box-shadow: 0 8px 24px rgba(0,0,0,.5); }
+    .tooltip { display: none; position: absolute; bottom: calc(100% + 6px); left: 50%; transform: translateX(-50%); background: #1e1e42; border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; font-size: 11px; color: var(--text); line-height: 1.5; width: 280px; white-space: normal; z-index: 10; box-shadow: 0 8px 24px rgba(0,0,0,.5); pointer-events: none; }
     .pill:hover .tooltip { display: block; }
     .error-bubble { align-self: flex-start; background: rgba(248,113,113,.1); border-left: 3px solid #f87171; color: #f87171; padding: 10px 14px; border-radius: var(--radius); font-size: 13px; }
     .input-bar { display: flex; gap: 8px; padding: 16px 20px; border-top: 1px solid var(--border); background: var(--chat-bg); }
@@ -228,7 +228,6 @@
   }
 
   $('messages').addEventListener('click', e => {
-    if (e.target.closest('.tooltip')) return;
     const pill = e.target.closest('.pill');
     if (!pill) return;
     const text  = pill.getAttribute('data-text') || '';
@@ -238,9 +237,12 @@
 
   function renderFinalAnswer(bubble, text, chunks) {
     const escaped = text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-    const withPills = escaped.replace(/\[Chunk (\d+)\]/g, (_, n) => {
-      const chunk = chunks.find(c => c.chunk_index === parseInt(n));
-      return makePill(n, chunk ? chunk.text : '', chunk ? chunk.similarity : null);
+    const withPills = escaped.replace(/\[[^\]]*Chunk\s+\d+[^\]]*\]/g, match => {
+      const nums = [...match.matchAll(/Chunk\s+(\d+)/g)].map(m => m[1]);
+      return nums.map(n => {
+        const chunk = chunks.find(c => c.chunk_index === parseInt(n));
+        return makePill(n, chunk ? chunk.text : '', chunk ? chunk.similarity : null);
+      }).join(' ');
     });
     bubble.innerHTML = withPills;
     const unknownAnswer = text.trim().toLowerCase().startsWith("i don't know");

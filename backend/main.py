@@ -72,7 +72,9 @@ async def serve_frontend() -> FileResponse:
 
 @app.get("/viewer")
 async def serve_viewer() -> FileResponse:
-    return FileResponse(VIEWER)
+    return FileResponse(
+        VIEWER, headers={"Cache-Control": "no-cache, no-store, must-revalidate"}
+    )
 
 
 @app.get("/doc/pdf")
