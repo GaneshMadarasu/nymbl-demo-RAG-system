@@ -111,7 +111,7 @@ asyncpg speaks the Postgres binary wire protocol directly, which gives lower lat
 Embedding large documents concurrently hits rate limits. Retries use exponential backoff (2, 4, 8 … 64 s) and only trigger on retryable status codes (`429 ResourceExhausted`, `503 ServiceUnavailable`, `UNAVAILABLE`). Non-retryable errors (bad request, auth failure) propagate immediately so they surface clearly rather than timing out.
 
 **Single HTML file frontend**
-No build tools, no Node.js, no npm. The UI is served directly by FastAPI, so setup is a single `uvicorn` command.
+No build tools, no Node.js, no npm. The UI is served directly by FastAPI, so setup is a single `uvicorn` command. Two CDN libraries are loaded at runtime: marked.js (markdown rendering in the chat) and PDF.js (PDF rendering in the viewer).
 
 **Hybrid search (dense + sparse, RRF fusion)**
 Vector similarity alone misses exact keyword matches — a query for a specific model number or proper noun may rank semantically similar but wrong chunks higher. Combining pgvector cosine search (dense) with Postgres `tsvector` BM25 ranking (sparse) and fusing results via Reciprocal Rank Fusion gives better coverage across both semantic and lexical queries.
@@ -130,6 +130,9 @@ Logs write to both the console and `logs/app.log`. The file handler rotates at 5
 
 **PDF viewer with chunk highlighting**
 Clicking a citation pill opens a separate viewer page (`/viewer`) that renders the full document via PDF.js and highlights the cited chunk in yellow. The chunk's page number is stored in the database at ingest time (by scanning each PDF page with PyMuPDF and matching the chunk text), so the viewer navigates directly to the right page rather than scanning the whole document at query time.
+
+**Markdown rendering in answers**
+Gemini's responses use markdown — bold headings, bullet lists, inline code. The chat renders these via marked.js rather than showing raw syntax like `**`. Chunk citations (`[Chunk N]` or `[Chunk N, Chunk M, ...]`) are extracted from the markdown source before parsing and replaced with interactive pill elements; the surrounding text is then parsed with marked.js and set as innerHTML. This order (citations first, then markdown) avoids marked.js mis-interpreting bracket syntax as link references.
 
 **Cross-page chunk highlighting**
 A single chunk can span two PDF pages. The viewer highlights up to three pages: the stored page (always), the page before it (in case the chunk's real start is there due to math-heavy openings that confuse the page-finder), and the page after (in case the chunk spills over). Each direction uses a different strategy: the target page uses substring anchors then word-sequence matching; the preceding page searches for the chunk start working forward; the following page anchors from the chunk's end working backward, with a `localAnchors` fallback that finds words present in both the chunk text and the page text. This fallback is necessary because PyMuPDF (used at ingest) and PDF.js (used in the browser) extract math and symbols differently, so normalized forms can diverge — shared plain-English words are always reliable anchors regardless of extraction differences.
