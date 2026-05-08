@@ -98,14 +98,14 @@ async def insert_chunks(
 _HYBRID_SQL = """
 WITH
 dense AS (
-    SELECT chunk_index, text, parent_text,
+    SELECT chunk_index, text, parent_text, page_number,
            1 - (embedding <=> $1::vector) AS similarity,
            ROW_NUMBER() OVER (ORDER BY embedding <=> $1::vector) AS rank
     FROM chunks WHERE doc_id = $2
     ORDER BY embedding <=> $1::vector LIMIT $3 * 2
 ),
 sparse AS (
-    SELECT chunk_index, text, parent_text,
+    SELECT chunk_index, text, parent_text, page_number,
            ROW_NUMBER() OVER (
                ORDER BY ts_rank_cd(tsv, plainto_tsquery('english', $4)) DESC
            ) AS rank
@@ -117,23 +117,24 @@ sparse AS (
 ),
 fused AS (
     SELECT
-        COALESCE(d.chunk_index, s.chunk_index) AS chunk_index,
-        COALESCE(d.text, s.text)               AS text,
-        COALESCE(d.parent_text, s.parent_text) AS parent_text,
-        COALESCE(d.similarity, 0.0)             AS similarity,
+        COALESCE(d.chunk_index, s.chunk_index)   AS chunk_index,
+        COALESCE(d.text, s.text)                 AS text,
+        COALESCE(d.parent_text, s.parent_text)   AS parent_text,
+        COALESCE(d.page_number, s.page_number)   AS page_number,
+        COALESCE(d.similarity, 0.0)              AS similarity,
         COALESCE(1.0 / (60.0 + d.rank), 0.0) +
-        COALESCE(1.0 / (60.0 + s.rank), 0.0)   AS rrf_score
+        COALESCE(1.0 / (60.0 + s.rank), 0.0)    AS rrf_score
     FROM dense d
     FULL OUTER JOIN sparse s ON d.chunk_index = s.chunk_index
 )
-SELECT chunk_index, text, parent_text, similarity, rrf_score
+SELECT chunk_index, text, parent_text, page_number, similarity, rrf_score
 FROM fused
 ORDER BY rrf_score DESC
 LIMIT $3
 """
 
 _DENSE_SQL = """
-SELECT chunk_index, text, parent_text,
+SELECT chunk_index, text, parent_text, page_number,
        1 - (embedding <=> $1::vector) AS similarity,
        1 - (embedding <=> $1::vector) AS rrf_score
 FROM chunks WHERE doc_id = $2

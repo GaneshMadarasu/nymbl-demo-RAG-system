@@ -50,7 +50,15 @@
     .bubble.rendered code { background: rgba(255,255,255,.08); padding: 1px 5px; border-radius: 3px; font-family: monospace; font-size: 12px; }
     .msg.user .bubble { background: var(--user-bubble); color: var(--muted); }
     .msg.assistant .bubble { background: var(--bubble); border-left: 3px solid var(--accent); }
-    .citations { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+    .citations { margin-top: 14px; border-top: 1px solid var(--border); padding-top: 10px; }
+    .citations-header { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin-bottom: 8px; }
+    .citation-ref { display: flex; align-items: flex-start; gap: 8px; margin-bottom: 10px; font-size: 12px; }
+    .ref-body { display: flex; flex-direction: column; gap: 3px; align-items: flex-start; }
+    .ref-page-heading { font-size: 10px; font-weight: 700; color: var(--muted); letter-spacing: .06em; text-transform: uppercase; max-width: 220px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .ref-num { color: var(--muted); font-size: 11px; font-weight: 700; min-width: 24px; padding-top: 2px; }
+    .cite-badge { display: inline-flex; align-items: center; justify-content: center; background: var(--pill-bg); color: var(--accent); border-radius: 4px; padding: 0 4px; font-size: 10px; font-weight: 700; cursor: pointer; vertical-align: super; line-height: 1.4; margin: 0 1px; transition: background .2s; user-select: none; }
+    .cite-badge:hover { background: #2a4a6f; }
+    .pill-ghost { opacity: .4; cursor: default; pointer-events: none; }
     .pill { background: var(--pill-bg); color: var(--accent); border-radius: 20px; padding: 2px 10px; font-size: 11px; cursor: pointer; position: relative; transition: background .2s; user-select: none; display: inline-flex; align-items: center; gap: 5px; }
     .pill:hover { background: #2a4a6f; }
     .pill-sim { font-size: 9px; font-weight: 700; padding: 1px 5px; border-radius: 10px; line-height: 1.4; }
@@ -105,6 +113,7 @@
   const $ = id => document.getElementById(id);
   let currentDoc = null;
   let queryActive = false;
+  let conversationHistory = [];
 
   async function readSSE(response, onEvent) {
     const reader = response.body.getReader();
@@ -119,7 +128,7 @@
       for (const line of lines) {
         if (line.startsWith('data: ')) {
           const raw = line.slice(6).trim();
-          if (raw) { try { onEvent(JSON.parse(raw)); } catch (_) {} }
+          if (raw) { await onEvent(JSON.parse(raw)); }
         }
       }
     }
@@ -142,6 +151,7 @@
   async function handleUpload(file) {
     hideSidebarError();
     currentDoc = null;
+    conversationHistory = [];
     $('doc-card').classList.remove('visible');
     queryInput.disabled = true; sendBtn.disabled = true;
     queryInput.placeholder = 'Upload a PDF first';
@@ -191,12 +201,18 @@
     let accumulated = '';
     let sources = [];
     try {
-      const res = await fetch('/query', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question: q }) });
+      const res = await fetch('/query', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question: q, history: conversationHistory }) });
       if (!res.ok) { const err = await res.json(); throw new Error(err.detail || 'Query failed'); }
-      await readSSE(res, event => {
+      await readSSE(res, async event => {
         if (event.type === 'sources') { sources = event.chunks; }
         else if (event.type === 'token') { accumulated += event.text; assistantBubble.textContent = accumulated; }
-        else if (event.type === 'done') { renderFinalAnswer(assistantBubble, accumulated, sources); }
+        else if (event.type === 'error') { throw new Error(event.message || 'Query failed'); }
+        else if (event.type === 'done') {
+          await renderFinalAnswer(assistantBubble, accumulated, sources);
+          conversationHistory.push({ role: 'user', content: q });
+          conversationHistory.push({ role: 'assistant', content: accumulated });
+          if (conversationHistory.length > 10) conversationHistory = conversationHistory.slice(-10);
+        }
       });
     } catch (err) {
       assistantBubble.closest('.msg')?.remove();
@@ -223,6 +239,7 @@
     msg.appendChild(bubble); $('messages').appendChild(msg); scrollToBottom(); return bubble;
   }
 
+
   function simBadge(sim) {
     if (sim == null) return '';
     const pct = Math.round(sim * 100);
@@ -232,42 +249,74 @@
 
   function makePill(chunkIndex, text, sim) {
     const tip = `<span class="tooltip">${escapeHtml(text)}</span>`;
-    return `<span class="pill" data-chunk="${chunkIndex}" data-text="${escapeHtml(text)}" title="Click to open in document">§ Chunk ${chunkIndex}${simBadge(sim)}${tip}</span>`;
+    return `<span class="pill" data-chunk="${chunkIndex}" data-text="${escapeHtml(text)}" title="Click to open in document">§ ${chunkIndex}${simBadge(sim)}${tip}</span>`;
   }
 
   $('messages').addEventListener('click', e => {
-    const pill = e.target.closest('.pill');
-    if (!pill) return;
-    const text  = pill.getAttribute('data-text') || '';
-    const chunk = pill.getAttribute('data-chunk') || '';
+    const el = e.target.closest('.pill, .cite-badge');
+    if (!el) return;
+    const text  = el.getAttribute('data-text') || '';
+    const chunk = el.getAttribute('data-chunk') || '';
     window.open(`/viewer?chunk=${encodeURIComponent(chunk)}&text=${encodeURIComponent(text.slice(0, 300))}`, '_blank');
   });
 
-  function renderFinalAnswer(bubble, text, chunks) {
-    // Parse markdown → HTML, then replace [Chunk N] citations with pill elements.
+  async function renderFinalAnswer(bubble, text, chunks) {
+    // Map chunk_index → sequential citation number in order of first appearance.
+    const citationMap = new Map();
+    let citeCounter = 0;
+
     const markdownHtml = marked.parse(text, { breaks: false, gfm: true });
-    const withPills = markdownHtml.replace(/\[[^\]]*Chunk\s+\d+[^\]]*\]/g, match => {
-      const nums = [...match.matchAll(/Chunk\s+(\d+)/g)].map(m => m[1]);
+    const withCites = markdownHtml.replace(/\[[^\]]*Chunk\s+\d+[^\]]*\]/g, match => {
+      const nums = [...match.matchAll(/Chunk\s+(\d+)/g)].map(m => parseInt(m[1]));
       if (!nums.length) return match;
       return nums.map(n => {
-        const chunk = chunks.find(c => c.chunk_index === parseInt(n));
-        return makePill(n, chunk ? chunk.text : '', chunk ? chunk.similarity : null);
-      }).join(' ');
+        if (!citationMap.has(n)) citationMap.set(n, ++citeCounter);
+        const num = citationMap.get(n);
+        const chunk = chunks.find(c => c.chunk_index === n);
+        return `<span class="cite-badge" data-chunk="${n}" data-text="${escapeHtml(chunk ? chunk.text : '')}" title="Click to open in document">[${num}]</span>`;
+      }).join('');
     });
+
     bubble.classList.add('rendered');
-    bubble.innerHTML = withPills;
+    bubble.innerHTML = withCites;
+
     const unknownAnswer = text.trim().toLowerCase().startsWith("i don't know");
-    if (chunks.length > 0 && !unknownAnswer) {
-      const cites = document.createElement('div'); cites.className = 'citations';
-      const seen = new Set();
-      chunks.forEach(c => {
-        if (seen.has(c.chunk_index)) return; seen.add(c.chunk_index);
-        const pill = document.createElement('span');
-        pill.innerHTML = makePill(c.chunk_index, c.text, c.similarity);
-        cites.appendChild(pill.firstChild);
-      });
-      bubble.closest('.msg').appendChild(cites);
+    if (citationMap.size === 0 || unknownAnswer) { scrollToBottom(); return; }
+
+    // Fetch data for any cited chunks not present in the sources event.
+    const allChunks = [...chunks];
+    const missingIdxs = [...citationMap.keys()].filter(idx => !allChunks.find(c => c.chunk_index === idx));
+    if (missingIdxs.length) {
+      const fetched = await Promise.all(missingIdxs.map(async idx => {
+        try {
+          const r = await fetch(`/doc/chunk/${idx}`);
+          if (!r.ok) return null;
+          const d = await r.json();
+          return { chunk_index: idx, text: d.text || '', similarity: null, page_number: d.page_number || null };
+        } catch { return null; }
+      }));
+      fetched.forEach(c => { if (c) allChunks.push(c); });
     }
+
+    const cites = document.createElement('div'); cites.className = 'citations';
+    const header = document.createElement('div'); header.className = 'citations-header';
+    header.textContent = 'References';
+    cites.appendChild(header);
+
+    const orderedEntries = [...citationMap.entries()].sort((a, b) => a[1] - b[1]);
+    orderedEntries.forEach(([chunkIdx, num]) => {
+      const chunk = allChunks.find(c => c.chunk_index === chunkIdx);
+      const ref = document.createElement('div'); ref.className = 'citation-ref';
+      const pageHeading = chunk?.page_number ? `<div class="ref-page-heading">Page ${chunk.page_number}</div>` : '';
+      const pct = chunk?.similarity ? Math.round(chunk.similarity * 100) : 0;
+      const cls = pct >= 75 ? 'sim-high' : pct >= 50 ? 'sim-mid' : 'sim-low';
+      const sim = pct ? `<span class="pill-sim ${cls}">${pct}%</span>` : '';
+      const tip = chunk?.text ? `<span class="tooltip">${escapeHtml(chunk.text)}</span>` : '';
+      ref.innerHTML = `<span class="ref-num">[${num}]</span><div class="ref-body">${pageHeading}<span class="pill" data-chunk="${chunkIdx}" data-text="${escapeHtml(chunk?.text || '')}" title="Click to open in document">§ ${chunkIdx}${sim}${tip}</span></div>`;
+      cites.appendChild(ref);
+    });
+
+    bubble.closest('.msg').appendChild(cites);
     scrollToBottom();
   }
 
@@ -289,6 +338,7 @@
   $('clear-btn').addEventListener('click', async () => {
     await fetch('/doc', { method: 'DELETE' });
     currentDoc = null;
+    conversationHistory = [];
     $('doc-card').classList.remove('visible');
     setUploadZoneVisible(true);
     hideSidebarError();

@@ -162,6 +162,7 @@ async def clear_doc() -> dict:
 
 class QueryRequest(BaseModel):
     question: str
+    history: list[dict] = []
 
 
 @app.post("/query")
@@ -172,7 +173,13 @@ async def query_doc(req: QueryRequest) -> StreamingResponse:
         )
 
     async def stream():
-        async for event in query.run_query(req.question, _state["doc_id"], _state["k"]):
-            yield f"data: {json.dumps(event)}\n\n"
+        try:
+            async for event in query.run_query(
+                req.question, _state["doc_id"], _state["k"], history=req.history
+            ):
+                yield f"data: {json.dumps(event)}\n\n"
+        except Exception as exc:
+            logger.exception("Query stream failed")
+            yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
 
     return StreamingResponse(stream(), media_type="text/event-stream")
