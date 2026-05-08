@@ -1,4 +1,3 @@
-import pytest
 from backend.db import insert_chunks, search_chunks, clear_all_chunks, get_doc_info
 
 

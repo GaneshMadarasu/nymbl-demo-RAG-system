@@ -4,7 +4,7 @@ from backend.query import build_prompt, run_query, SYSTEM_PROMPT
 
 def test_build_prompt_includes_system_prompt():
     chunks = [{"chunk_index": 0, "text": "AI is transformative."}]
-    prompt = build_prompt("What is AI?", chunks)
+    prompt = build_prompt("What is AI?", chunks, history=[])
     assert SYSTEM_PROMPT in prompt
 
 
@@ -13,16 +13,17 @@ def test_build_prompt_formats_chunk_references():
         {"chunk_index": 3, "text": "Deep learning uses neural networks."},
         {"chunk_index": 17, "text": "Transformers changed NLP."},
     ]
-    prompt = build_prompt("What changed NLP?", chunks)
-    assert "[Chunk 3]" in prompt
+    prompt = build_prompt("What changed NLP?", chunks, history=[])
+    # Labels are sequential 1-N regardless of DB chunk_index values.
+    assert "[Chunk 1]" in prompt
     assert "Deep learning uses neural networks." in prompt
-    assert "[Chunk 17]" in prompt
+    assert "[Chunk 2]" in prompt
     assert "What changed NLP?" in prompt
 
 
 def test_build_prompt_includes_question():
     chunks = [{"chunk_index": 0, "text": "some text"}]
-    prompt = build_prompt("What are the key findings?", chunks)
+    prompt = build_prompt("What are the key findings?", chunks, history=[])
     assert "What are the key findings?" in prompt
 
 
