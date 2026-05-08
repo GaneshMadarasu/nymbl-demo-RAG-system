@@ -10,7 +10,7 @@ Single-document RAG system: upload a PDF, ask questions, get grounded answers wi
 | Embeddings | `gemini-embedding-2` (768-dim) |
 | Chunking | tiktoken-aware sentence-boundary splitter |
 | Retrieval | Hybrid search — pgvector HNSW (dense) + `tsvector` BM25 (sparse), fused via RRF |
-| Re-ranking | Gemini 2.0 Flash (lightweight model, orders retrieved chunks before answering) |
+| Re-ranking | Gemini 2.5 Flash (same model as answering, orders retrieved chunks before answering) |
 | Answering | Gemini 2.5 Flash (streamed) |
 | Vector store | Postgres 16 + pgvector (HNSW) |
 | Backend | FastAPI + asyncpg |
@@ -117,7 +117,7 @@ No build tools, no Node.js, no npm. The UI is served directly by FastAPI, so set
 Vector similarity alone misses exact keyword matches — a query for a specific model number or proper noun may rank semantically similar but wrong chunks higher. Combining pgvector cosine search (dense) with Postgres `tsvector` BM25 ranking (sparse) and fusing results via Reciprocal Rank Fusion gives better coverage across both semantic and lexical queries.
 
 **Two-model re-ranking pipeline**
-Retrieved chunks are re-ordered by a lightweight model (`gemini-2.0-flash`) before the top half are passed to the answering model (`gemini-2.5-flash`). Using a smaller model for ranking keeps latency low — ranking is a simple ordering task that doesn't need the full capability of the answering model — while still improving the quality of context the answering model receives.
+Retrieved chunks are re-ordered by `gemini-2.5-flash` before the top half are passed to the same model for answering. Using a smaller model for ranking keeps latency low — ranking is a simple ordering task that doesn't need the full capability of the answering model — while still improving the quality of context the answering model receives.
 
 **Ingest deduplication / skip re-embedding**
 Each uploaded PDF is identified by a SHA-256 hash of its bytes. If the same file is re-uploaded while its chunks are still in the database, the embedding step is skipped entirely and the cached result is returned immediately. `doc_meta` is preserved across uploads so the hash can be checked even after the chunks table is cleared for a new document; the skip only fires when both the metadata record and the actual chunks are present.
