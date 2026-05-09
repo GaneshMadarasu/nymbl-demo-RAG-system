@@ -29,6 +29,15 @@ CREATE TABLE IF NOT EXISTS doc_meta (
     created_at  TIMESTAMPTZ DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS ocr_lines (
+    doc_id    TEXT       NOT NULL,
+    page_num  INTEGER    NOT NULL,
+    line_idx  INTEGER    NOT NULL,
+    text      TEXT       NOT NULL,
+    bbox      INTEGER[]  NOT NULL,
+    PRIMARY KEY (doc_id, page_num, line_idx)
+);
+
 CREATE INDEX IF NOT EXISTS chunks_embedding_idx ON chunks USING hnsw (embedding vector_cosine_ops);
 """
 
@@ -63,6 +72,19 @@ BEGIN
         ALTER TABLE chunks ADD COLUMN chunk_type TEXT NOT NULL DEFAULT 'text';
         ALTER TABLE chunks ADD COLUMN image_data BYTEA;
         ALTER TABLE chunks ADD COLUMN image_mime TEXT;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.tables
+        WHERE table_name = 'ocr_lines'
+    ) THEN
+        CREATE TABLE ocr_lines (
+            doc_id    TEXT       NOT NULL,
+            page_num  INTEGER    NOT NULL,
+            line_idx  INTEGER    NOT NULL,
+            text      TEXT       NOT NULL,
+            bbox      INTEGER[]  NOT NULL,
+            PRIMARY KEY (doc_id, page_num, line_idx)
+        );
     END IF;
 END
 $$;
@@ -260,6 +282,7 @@ async def upsert_doc_meta(
 async def clear_all_chunks(pool: asyncpg.Pool) -> None:
     async with pool.acquire() as conn:
         await conn.execute("TRUNCATE TABLE chunks RESTART IDENTITY")
+        await conn.execute("TRUNCATE TABLE ocr_lines")
 
 
 async def get_doc_info(pool: asyncpg.Pool, doc_id: str) -> dict | None:
@@ -285,3 +308,40 @@ async def get_latest_doc(pool: asyncpg.Pool) -> dict | None:
             "k": row["k"],
         }
     return None
+
+
+async def insert_ocr_lines(
+    pool: asyncpg.Pool,
+    doc_id: str,
+    lines_by_page: dict[int, list[dict]],
+) -> None:
+    """Insert OCR'd lines with bboxes. lines_by_page maps page_num -> list of
+    {"text": str, "box": [ymin, xmin, ymax, xmax]} (coords normalized 0-1000)."""
+    rows = []
+    for page_num, lines in lines_by_page.items():
+        for idx, line in enumerate(lines):
+            rows.append((doc_id, page_num, idx, line["text"], list(line["box"])))
+    if not rows:
+        return
+    async with pool.acquire() as conn:
+        await conn.executemany(
+            "INSERT INTO ocr_lines (doc_id, page_num, line_idx, text, bbox) "
+            "VALUES ($1, $2, $3, $4, $5)",
+            rows,
+        )
+
+
+async def get_ocr_lines(pool: asyncpg.Pool, doc_id: str, page_num: int) -> list[dict]:
+    """Return [{line_idx, text, bbox}] for one page, ordered by line_idx.
+    Empty list if page wasn't OCR'd."""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT line_idx, text, bbox FROM ocr_lines "
+            "WHERE doc_id = $1 AND page_num = $2 ORDER BY line_idx",
+            doc_id,
+            page_num,
+        )
+    return [
+        {"line_idx": r["line_idx"], "text": r["text"], "bbox": list(r["bbox"])}
+        for r in rows
+    ]

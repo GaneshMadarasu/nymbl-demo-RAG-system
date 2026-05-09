@@ -22,4 +22,5 @@ async def pool():
     async with p.acquire() as conn:
         await conn.execute("TRUNCATE TABLE chunks RESTART IDENTITY")
         await conn.execute("TRUNCATE TABLE doc_meta")
+        await conn.execute("TRUNCATE TABLE ocr_lines")
     await p.close()
