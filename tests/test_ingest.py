@@ -181,3 +181,68 @@ async def test_ocr_one_page_render_failure_returns_empty():
         text, lines = await _ocr_one_page(b"fake-pdf", 1)
     assert text == ""
     assert lines == []
+
+
+async def test_ocr_empty_pages_only_ocrs_below_threshold():
+    pages = [
+        "Substantial first page text " * 20,  # > 50 chars → not OCR'd
+        "",  # empty → OCR'd
+        "tiny",  # < 50 → OCR'd
+        "Plenty of words on this fourth page that is well above threshold",
+    ]
+    captured_pages: list[int] = []
+
+    async def fake_ocr(_pdf, page_num):
+        captured_pages.append(page_num)
+        return f"OCR text page {page_num}", [
+            {"text": f"OCR text page {page_num}", "box": [0, 0, 10, 100]}
+        ]
+
+    with patch("backend.ingest._ocr_one_page", side_effect=fake_ocr):
+        from backend.ingest import _ocr_empty_pages
+
+        updated, ocr_set, lines_by_page = await _ocr_empty_pages(b"pdf", pages)
+
+    assert sorted(captured_pages) == [2, 3]
+    assert ocr_set == {2, 3}
+    assert updated[0] == pages[0]
+    assert updated[1] == "OCR text page 2"
+    assert updated[2] == "OCR text page 3"
+    assert updated[3] == pages[3]
+    assert set(lines_by_page.keys()) == {2, 3}
+
+
+async def test_ocr_empty_pages_failure_isolated():
+    pages = ["", "", ""]
+
+    async def fake_ocr(_pdf, page_num):
+        if page_num == 2:
+            return "", []  # simulate failure -> empty
+        return f"page {page_num} text", [
+            {"text": f"page {page_num} text", "box": [0, 0, 5, 50]}
+        ]
+
+    with patch("backend.ingest._ocr_one_page", side_effect=fake_ocr):
+        from backend.ingest import _ocr_empty_pages
+
+        updated, ocr_set, lines_by_page = await _ocr_empty_pages(b"pdf", pages)
+
+    assert updated[0] == "page 1 text"
+    assert updated[1] == ""  # failed page kept empty
+    assert updated[2] == "page 3 text"
+    assert ocr_set == {1, 3}  # only successfully OCR'd pages in the set
+    assert set(lines_by_page.keys()) == {1, 3}
+
+
+async def test_ocr_empty_pages_no_empty_pages_no_calls():
+    pages = ["Lots of text " * 10, "More text " * 20]
+    fake_ocr = AsyncMock()
+    with patch("backend.ingest._ocr_one_page", fake_ocr):
+        from backend.ingest import _ocr_empty_pages
+
+        updated, ocr_set, lines_by_page = await _ocr_empty_pages(b"pdf", pages)
+
+    fake_ocr.assert_not_awaited()
+    assert updated == pages
+    assert ocr_set == set()
+    assert lines_by_page == {}

@@ -454,6 +454,54 @@ async def _ocr_one_page(pdf_bytes: bytes, page_num: int) -> tuple[str, list[dict
     return "\n".join(text_parts), lines
 
 
+async def _ocr_empty_pages(
+    pdf_bytes: bytes, pages: list[str]
+) -> tuple[list[str], set[int], dict[int, list[dict]]]:
+    """For each page in `pages` whose stripped text length is below the
+    threshold, OCR it via Gemini Vision. Returns (updated_pages,
+    ocr_page_nums, ocr_lines_by_page).
+
+    - updated_pages: copy of `pages` with successfully-OCR'd entries replaced
+      by the transcribed text; failed pages remain as their original empty
+      text.
+    - ocr_page_nums: 1-indexed pages where OCR returned non-empty text.
+    - ocr_lines_by_page: {page_num: [{"text", "box"}, ...]} for pages with
+      bbox lines, used to populate the ocr_lines table for the viewer.
+    """
+    targets = [
+        i + 1
+        for i, p in enumerate(pages)
+        if len(p.strip()) <= _OCR_EMPTY_PAGE_THRESHOLD
+    ]
+    if not targets:
+        return list(pages), set(), {}
+
+    logger.info("Running OCR on %d empty/sparse page(s)", len(targets))
+    results = await _gather_bounded(
+        [_ocr_one_page(pdf_bytes, n) for n in targets],
+        _GEMINI_CONCURRENCY,
+    )
+
+    updated = list(pages)
+    ocr_set: set[int] = set()
+    lines_by_page: dict[int, list[dict]] = {}
+
+    for page_num, (text, lines) in zip(targets, results):
+        if not text:
+            continue
+        updated[page_num - 1] = text
+        ocr_set.add(page_num)
+        if lines:
+            lines_by_page[page_num] = lines
+
+    logger.info(
+        "OCR completed: %d/%d pages produced text",
+        len(ocr_set),
+        len(targets),
+    )
+    return updated, ocr_set, lines_by_page
+
+
 def _parent_texts(chunks: list[str]) -> list[str]:
     """Return adjacent-window text for each chunk (prev + self + next)."""
     result = []
