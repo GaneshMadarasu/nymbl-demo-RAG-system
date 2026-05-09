@@ -5,7 +5,7 @@ import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
@@ -174,7 +174,10 @@ _MAX_UPLOAD_BYTES = 500 * 1024 * 1024  # 500 MB
 
 
 @app.post("/ingest")
-async def ingest_pdf(file: UploadFile = File(...)) -> StreamingResponse:
+async def ingest_pdf(
+    file: UploadFile = File(...),
+    process_images: bool = Form(True),
+) -> StreamingResponse:
     if not (file.filename or "").lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
     pdf_bytes = await file.read()
@@ -186,7 +189,9 @@ async def ingest_pdf(file: UploadFile = File(...)) -> StreamingResponse:
 
     async def stream():
         try:
-            async for event in ingest.run_ingest(pdf_bytes):
+            async for event in ingest.run_ingest(
+                pdf_bytes, process_images=process_images
+            ):
                 if event.get("status") == "done":
                     _state["doc_id"] = event["doc_id"]
                     _state["chunk_count"] = event["chunk_count"]

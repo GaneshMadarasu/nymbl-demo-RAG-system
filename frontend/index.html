@@ -88,6 +88,19 @@
     .img-title-link { color: #d97706; text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 2px; cursor: pointer; transition: background .15s; border-radius: 2px; padding: 0 1px; }
     .img-title-link:hover { background: rgba(217, 119, 6, .14); text-decoration-style: solid; }
     .bubble.rendered strong .img-title-link { color: inherit; }
+    .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(15, 23, 42, .55); align-items: center; justify-content: center; z-index: 1000; }
+    .modal-overlay.visible { display: flex; }
+    .modal-card { background: var(--chat-bg); border-radius: 12px; padding: 24px 24px 20px; max-width: 460px; width: calc(100% - 40px); box-shadow: 0 20px 60px rgba(15, 23, 42, .25); }
+    .modal-title { font-size: 16px; font-weight: 700; color: var(--text); margin-bottom: 6px; }
+    .modal-filename { font-size: 12px; color: var(--muted); margin-bottom: 14px; word-break: break-all; }
+    .modal-body { font-size: 13px; line-height: 1.5; color: var(--text); margin-bottom: 18px; }
+    .modal-actions { display: flex; gap: 10px; justify-content: flex-end; flex-wrap: wrap; }
+    .modal-btn { padding: 8px 14px; border-radius: 6px; border: 1px solid var(--border); background: var(--input-bg); color: var(--text); font-size: 13px; font-weight: 600; cursor: pointer; transition: background .15s, border-color .15s; }
+    .modal-btn:hover { background: #ede9fe; border-color: var(--accent); }
+    .modal-btn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+    .modal-btn.primary:hover { background: #6d28d9; border-color: #6d28d9; }
+    .modal-btn.cancel { background: transparent; color: var(--muted); border-color: transparent; }
+    .modal-btn.cancel:hover { background: var(--bubble); border-color: var(--border); color: var(--text); }
   </style>
 </head>
 <body>
@@ -118,6 +131,23 @@
       <button class="send-btn" id="send-btn" disabled>→</button>
     </div>
   </main>
+</div>
+
+<div class="modal-overlay" id="ingest-modal" role="dialog" aria-modal="true" aria-labelledby="ingest-modal-title">
+  <div class="modal-card">
+    <div class="modal-title" id="ingest-modal-title">Process images in this PDF?</div>
+    <div class="modal-filename" id="ingest-modal-filename"></div>
+    <div class="modal-body">
+      Image processing extracts every figure, captions it with Gemini Vision, and embeds each caption.
+      It enables visual citations and makes painting/figure names in answers clickable.
+      Skip it for a faster, text-only ingest.
+    </div>
+    <div class="modal-actions">
+      <button class="modal-btn cancel" id="ingest-modal-cancel">Cancel</button>
+      <button class="modal-btn" id="ingest-modal-skip">Text only (faster)</button>
+      <button class="modal-btn primary" id="ingest-modal-confirm">Process images</button>
+    </div>
+  </div>
 </div>
 <script>
   const $ = id => document.getElementById(id);
@@ -196,18 +226,40 @@
   const uploadZone = $('upload-zone');
   const fileInput = $('file-input');
   uploadZone.addEventListener('click', () => fileInput.click());
-  fileInput.addEventListener('change', e => { if (e.target.files[0]) handleUpload(e.target.files[0]); });
+  fileInput.addEventListener('change', e => { if (e.target.files[0]) askIngestMode(e.target.files[0]); });
   uploadZone.addEventListener('dragover', e => { e.preventDefault(); uploadZone.classList.add('dragover'); });
   uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('dragover'));
   uploadZone.addEventListener('drop', e => {
     e.preventDefault();
     uploadZone.classList.remove('dragover');
     const file = e.dataTransfer.files[0];
-    if (file && file.name.endsWith('.pdf')) handleUpload(file);
+    if (file && file.name.endsWith('.pdf')) askIngestMode(file);
     else showSidebarError('Please drop a PDF file.');
   });
 
-  async function handleUpload(file) {
+  // Show the ingest-mode modal and resolve to true (process images) / false
+  // (text only) / null (cancel).
+  function askIngestMode(file) {
+    const modal = $('ingest-modal');
+    $('ingest-modal-filename').textContent = file.name;
+    modal.classList.add('visible');
+    const cleanup = () => {
+      modal.classList.remove('visible');
+      $('ingest-modal-confirm').removeEventListener('click', onConfirm);
+      $('ingest-modal-skip').removeEventListener('click', onSkip);
+      $('ingest-modal-cancel').removeEventListener('click', onCancel);
+      // reset file input so picking the same file again still triggers change
+      fileInput.value = '';
+    };
+    const onConfirm = () => { cleanup(); handleUpload(file, true); };
+    const onSkip    = () => { cleanup(); handleUpload(file, false); };
+    const onCancel  = () => { cleanup(); };
+    $('ingest-modal-confirm').addEventListener('click', onConfirm);
+    $('ingest-modal-skip').addEventListener('click', onSkip);
+    $('ingest-modal-cancel').addEventListener('click', onCancel);
+  }
+
+  async function handleUpload(file, processImages = true) {
     hideSidebarError();
     currentDoc = null;
     conversationHistory = [];
@@ -218,6 +270,7 @@
     setUploadZoneVisible(false);
     const formData = new FormData();
     formData.append('file', file);
+    formData.append('process_images', processImages ? 'true' : 'false');
     try {
       const res = await fetch('/ingest', { method: 'POST', body: formData });
       if (!res.ok) { const err = await res.json(); throw new Error(err.detail || 'Upload failed'); }

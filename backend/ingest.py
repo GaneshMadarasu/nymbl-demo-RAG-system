@@ -9,6 +9,7 @@ import fitz  # pymupdf
 import tiktoken
 from google import genai
 from google.genai import types
+from PIL import Image
 
 from backend import db
 from backend.chunks import chunk_text
@@ -34,6 +35,16 @@ _FULLPAGE_DPI = 150  # DPI for stage-2 full-page fallback render
 # Stage 2 fires only on pages with no embedded images AND text length under this
 # limit — heuristic for "this page is mostly a painting/scan with little text".
 _PAGE_TEXT_FALLBACK_LIMIT = 200
+# Vision doesn't need full resolution to caption an image. Resize to this max
+# dimension and re-encode as JPEG before sending — cuts the upload payload
+# by 10-20× for high-DPI page renders.
+_CAPTION_MAX_DIM = 1024
+_CAPTION_JPEG_QUALITY = 85
+# Cap concurrent Gemini calls (caption + embed) to avoid 429s and the
+# exponential-backoff retries that follow them. 8 is well below the per-minute
+# limits of gemini-embedding-2 / gemini-2.5-flash and reduces overall wall time
+# vs unlimited gather() once you have ~30+ images.
+_GEMINI_CONCURRENCY = 8
 
 
 _BLANK_PHRASES = (
@@ -283,14 +294,44 @@ def _extract_images(pdf_bytes: bytes) -> list[tuple[int, bytes, str]]:
     return images
 
 
+def _downsize_for_vision(image_bytes: bytes) -> tuple[bytes, str]:
+    """Resize to <=_CAPTION_MAX_DIM on longest side and re-encode as JPEG.
+    Returns (bytes, mime). Falls back to the original on any error so
+    captioning still proceeds — the downsize is a perf optimization, not
+    a correctness requirement."""
+    try:
+        im = Image.open(BytesIO(image_bytes))
+        if im.mode not in ("RGB", "L"):
+            im = im.convert("RGB")
+        w, h = im.size
+        longest = max(w, h)
+        if longest > _CAPTION_MAX_DIM:
+            scale = _CAPTION_MAX_DIM / longest
+            im = im.resize(
+                (max(1, int(w * scale)), max(1, int(h * scale))),
+                Image.LANCZOS,
+            )
+        buf = BytesIO()
+        im.save(buf, format="JPEG", quality=_CAPTION_JPEG_QUALITY, optimize=True)
+        return buf.getvalue(), "image/jpeg"
+    except Exception as exc:
+        logger.warning("Image downsize failed (%s); using original bytes", exc)
+        return image_bytes, ""
+
+
 async def _caption_image(image_bytes: bytes, mime_type: str) -> str:
     """Caption an image using Gemini Vision. Retries on retryable errors."""
+    # Downsize before sending — Vision doesn't need 4K resolution to caption
+    # a painting, and high-DPI page renders are the bulk of the upload time.
+    send_bytes, send_mime = _downsize_for_vision(image_bytes)
+    if not send_mime:
+        send_mime = mime_type
     for attempt in range(_MAX_RETRIES):
         try:
             r = await _client.aio.models.generate_content(
                 model=_VISION_MODEL,
                 contents=[
-                    types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
+                    types.Part.from_bytes(data=send_bytes, mime_type=send_mime),
                     _CAPTION_PROMPT,
                 ],
             )
@@ -319,7 +360,21 @@ def _parent_texts(chunks: list[str]) -> list[str]:
     return result
 
 
-async def run_ingest(pdf_bytes: bytes) -> AsyncGenerator[dict, None]:
+async def _gather_bounded(coros, limit: int):
+    """Run `coros` with at most `limit` in flight. Cuts 429s vs unlimited
+    gather() and is reliably faster overall once the count exceeds ~limit*3."""
+    sem = asyncio.Semaphore(limit)
+
+    async def _run(c):
+        async with sem:
+            return await c
+
+    return await asyncio.gather(*[_run(c) for c in coros])
+
+
+async def run_ingest(
+    pdf_bytes: bytes, process_images: bool = True
+) -> AsyncGenerator[dict, None]:
     pool = await db.get_pool()
     doc_id = _doc_id(pdf_bytes)
     loop = asyncio.get_event_loop()
@@ -358,7 +413,9 @@ async def run_ingest(pdf_bytes: bytes) -> AsyncGenerator[dict, None]:
         "message": f"Embedding {total} chunks…",
         "progress": 0,
     }
-    embeddings = list(await asyncio.gather(*[_embed_one(c) for c in chunks]))
+    embeddings = list(
+        await _gather_bounded([_embed_one(c) for c in chunks], _GEMINI_CONCURRENCY)
+    )
 
     parents = _parent_texts(chunks)
     page_nums = [_find_chunk_page(c, pages) for c in chunks]
@@ -371,16 +428,25 @@ async def run_ingest(pdf_bytes: bytes) -> AsyncGenerator[dict, None]:
     await db.insert_chunks(pool, doc_id, rows)
     text_chunk_count = total
 
-    yield {"status": "extracting_images", "message": "Extracting images from PDF…"}
-    images = await loop.run_in_executor(None, _extract_images, pdf_bytes)
     image_chunk_count = 0
+    images: list = []
+    if process_images:
+        yield {
+            "status": "extracting_images",
+            "message": "Extracting images from PDF…",
+        }
+        images = await loop.run_in_executor(None, _extract_images, pdf_bytes)
+    else:
+        logger.info("Image processing skipped (text-only ingest)")
     if images:
         yield {
             "status": "captioning",
             "message": f"Captioning {len(images)} images…",
         }
         captions = list(
-            await asyncio.gather(*[_caption_image(b, m) for _, b, m in images])
+            await _gather_bounded(
+                [_caption_image(b, m) for _, b, m in images], _GEMINI_CONCURRENCY
+            )
         )
 
         # Drop blank-captioned images (decorative backgrounds, page renders
@@ -397,7 +463,11 @@ async def run_ingest(pdf_bytes: bytes) -> AsyncGenerator[dict, None]:
 
     if images:
         yield {"status": "embedding_images", "message": "Embedding image captions…"}
-        img_embeddings = list(await asyncio.gather(*[_embed_one(c) for c in captions]))
+        img_embeddings = list(
+            await _gather_bounded(
+                [_embed_one(c) for c in captions], _GEMINI_CONCURRENCY
+            )
+        )
 
         def _adjacent_page_text(page_num: int) -> str | None:
             # Include prev/this/next page text so facing-page layouts (image on
