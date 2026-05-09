@@ -288,3 +288,81 @@ def test_extract_images_default_skip_pages_is_none():
     # Should not raise; should return a list (may or may not have images)
     out = _extract_images(pdf_bytes)
     assert isinstance(out, list)
+
+
+async def test_run_ingest_default_ocr_off_no_change(pool):
+    """Regression guard: ocr_scanned defaults to False; behavior unchanged."""
+    fake_text = "This is real embedded text content. " * 30
+    with (
+        patch("backend.ingest.db.get_pool", new_callable=AsyncMock, return_value=pool),
+        patch("backend.ingest._extract_text", return_value=(fake_text, ["page1 text"])),
+        patch("backend.ingest._extract_images", return_value=[]),
+        patch(
+            "backend.ingest._embed_one",
+            new_callable=AsyncMock,
+            return_value=[0.1] * 768,
+        ),
+        patch("backend.ingest._ocr_empty_pages", new_callable=AsyncMock) as m_ocr,
+    ):
+        events = [e async for e in run_ingest(b"pdf-bytes")]
+    m_ocr.assert_not_awaited()
+    assert any(e["status"] == "done" for e in events)
+
+
+async def test_run_ingest_ocr_on_no_empty_pages_skips_vision(pool):
+    fake_pages = ["page one substantive text " * 10, "page two substantive text " * 10]
+    fake_text = "\n\n".join(fake_pages)
+    with (
+        patch("backend.ingest.db.get_pool", new_callable=AsyncMock, return_value=pool),
+        patch("backend.ingest._extract_text", return_value=(fake_text, fake_pages)),
+        patch("backend.ingest._extract_images", return_value=[]),
+        patch(
+            "backend.ingest._embed_one",
+            new_callable=AsyncMock,
+            return_value=[0.1] * 768,
+        ),
+        patch("backend.ingest._ocr_one_page", new_callable=AsyncMock) as m_ocr_one,
+    ):
+        events = [e async for e in run_ingest(b"pdf-bytes", ocr_scanned=True)]
+    m_ocr_one.assert_not_awaited()
+    assert any(e["status"] == "done" for e in events)
+
+
+async def test_run_ingest_ocr_on_with_empty_pages_calls_vision_and_inserts_lines(pool):
+    fake_pages = ["", "Substantial typed text on this page " * 5, ""]
+    fake_text = "\n\n".join(p for p in fake_pages if p.strip())
+
+    async def fake_ocr(_pdf, page_num):
+        return (
+            f"OCR'd text page {page_num} " * 4,
+            [{"text": f"OCR'd text page {page_num}", "box": [0, 0, 10, 100]}],
+        )
+
+    with (
+        patch("backend.ingest.db.get_pool", new_callable=AsyncMock, return_value=pool),
+        patch("backend.ingest._extract_text", return_value=(fake_text, fake_pages)),
+        patch("backend.ingest._extract_images", return_value=[]) as m_imgs,
+        patch(
+            "backend.ingest._embed_one",
+            new_callable=AsyncMock,
+            return_value=[0.1] * 768,
+        ),
+        patch("backend.ingest._ocr_one_page", side_effect=fake_ocr),
+    ):
+        events = [e async for e in run_ingest(b"pdf-bytes", ocr_scanned=True)]
+
+    statuses = [e["status"] for e in events]
+    assert "ocr" in statuses
+    done = next(e for e in events if e["status"] == "done")
+    assert done["chunk_count"] > 0
+
+    # _extract_images received skip_pages={1, 3} (the OCR'd pages)
+    _, kwargs = m_imgs.call_args
+    assert kwargs.get("skip_pages") == {1, 3}
+
+    # ocr_lines were persisted for both pages
+    from backend.db import get_ocr_lines
+
+    assert (await get_ocr_lines(pool, done["doc_id"], 1)) != []
+    assert (await get_ocr_lines(pool, done["doc_id"], 3)) != []
+    assert (await get_ocr_lines(pool, done["doc_id"], 2)) == []

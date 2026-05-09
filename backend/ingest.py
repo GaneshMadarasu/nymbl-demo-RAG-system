@@ -535,7 +535,9 @@ async def _gather_bounded(coros, limit: int):
 
 
 async def run_ingest(
-    pdf_bytes: bytes, process_images: bool = True
+    pdf_bytes: bytes,
+    process_images: bool = True,
+    ocr_scanned: bool = False,
 ) -> AsyncGenerator[dict, None]:
     pool = await db.get_pool()
     doc_id = _doc_id(pdf_bytes)
@@ -556,6 +558,22 @@ async def run_ingest(
 
     yield {"status": "extracting", "message": "Extracting text from PDF…"}
     text, pages = await loop.run_in_executor(None, _extract_text, pdf_bytes)
+
+    ocr_page_set: set[int] = set()
+    ocr_lines_by_page: dict[int, list[dict]] = {}
+    if ocr_scanned:
+        empty_count = sum(
+            1 for p in pages if len(p.strip()) <= _OCR_EMPTY_PAGE_THRESHOLD
+        )
+        if empty_count:
+            yield {
+                "status": "ocr",
+                "message": f"OCRing {empty_count} scanned page(s)…",
+            }
+            pages, ocr_page_set, ocr_lines_by_page = await _ocr_empty_pages(
+                pdf_bytes, pages
+            )
+            text = "\n\n".join(p for p in pages if p.strip())
 
     yield {"status": "chunking", "message": "Splitting into chunks…"}
     total_tokens = len(_tokenizer.encode(text))
@@ -588,6 +606,8 @@ async def run_ingest(
         )
     ]
     await db.insert_chunks(pool, doc_id, rows)
+    if ocr_lines_by_page:
+        await db.insert_ocr_lines(pool, doc_id, ocr_lines_by_page)
     text_chunk_count = total
 
     image_chunk_count = 0
@@ -597,7 +617,10 @@ async def run_ingest(
             "status": "extracting_images",
             "message": "Extracting images from PDF…",
         }
-        images = await loop.run_in_executor(None, _extract_images, pdf_bytes)
+        images = await loop.run_in_executor(
+            None,
+            lambda: _extract_images(pdf_bytes, skip_pages=ocr_page_set),
+        )
     else:
         logger.info("Image processing skipped (text-only ingest)")
     if images:
