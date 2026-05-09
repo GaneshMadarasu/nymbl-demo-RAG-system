@@ -32,3 +32,13 @@ def test_no_chunk_is_empty_string():
     text = "Sentence one. Sentence two. Sentence three."
     result = chunk_text(text, max_tokens=512)
     assert all(c.strip() for c in result)
+
+
+def test_unpunctuated_newline_separated_text_splits_on_newlines():
+    """Handwritten OCR'd content often has no sentence punctuation but
+    uses line breaks. The chunker must still find split points so a long
+    document doesn't collapse into a single oversized chunk."""
+    lines = [f"Line number {i} with some handwritten content" for i in range(50)]
+    text = "\n".join(lines)
+    chunks = chunk_text(text, max_tokens=64, overlap=8)
+    assert len(chunks) > 1, f"expected multiple chunks, got {len(chunks)}"

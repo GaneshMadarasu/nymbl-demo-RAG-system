@@ -8,7 +8,11 @@ def chunk_text(text: str, max_tokens: int = 512, overlap: int = 64) -> list[str]
     text = text.strip()
     if not text:
         return []
-    sentences = re.split(r"(?<=[.!?])\s+", text)
+    # Split on sentence boundaries (.!? + whitespace) OR raw newlines.
+    # The newline branch handles unpunctuated content (handwritten OCR
+    # output, bullet lists, headers) so the chunker still finds split
+    # points instead of collapsing the whole text into one giant chunk.
+    sentences = re.split(r"(?<=[.!?])\s+|\n+", text)
     chunks: list[str] = []
     current_sentences: list[str] = []
     current_token_count: int = 0
