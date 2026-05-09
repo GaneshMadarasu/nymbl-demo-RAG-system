@@ -88,6 +88,121 @@ def test_extract_text_captures_highlight_underline_and_freetext_annotations():
     assert "[note: ship blocker]" in page_text
 
 
+async def test_detect_visual_markup_one_page_parses_valid_json():
+    import json as _json
+
+    fake = SimpleNamespace(
+        text=_json.dumps(
+            {
+                "markup": [
+                    {"type": "underline", "color": "red", "text": "deadline"},
+                    {"type": "note", "color": "blue", "text": "review by Alex"},
+                ]
+            }
+        )
+    )
+    with (
+        patch("backend.ingest._render_page", return_value=(b"\x89PNG", "image/png")),
+        patch(
+            "backend.ingest._downsize_for_vision", return_value=(b"jpeg", "image/jpeg")
+        ),
+        patch(
+            "backend.ingest._client.aio.models.generate_content",
+            new_callable=AsyncMock,
+            return_value=fake,
+        ),
+    ):
+        from backend.ingest import _detect_visual_markup_one_page
+
+        items = await _detect_visual_markup_one_page(b"fake-pdf", 1)
+    assert len(items) == 2
+    assert items[0]["type"] == "underline"
+    assert items[0]["color"] == "red"
+    assert items[0]["text"] == "deadline"
+
+
+async def test_detect_visual_markup_one_page_handles_empty_array():
+    fake = SimpleNamespace(text='{"markup": []}')
+    with (
+        patch("backend.ingest._render_page", return_value=(b"\x89PNG", "image/png")),
+        patch(
+            "backend.ingest._downsize_for_vision", return_value=(b"jpeg", "image/jpeg")
+        ),
+        patch(
+            "backend.ingest._client.aio.models.generate_content",
+            new_callable=AsyncMock,
+            return_value=fake,
+        ),
+    ):
+        from backend.ingest import _detect_visual_markup_one_page
+
+        items = await _detect_visual_markup_one_page(b"fake-pdf", 1)
+    assert items == []
+
+
+async def test_detect_visual_markup_one_page_handles_malformed_json():
+    fake = SimpleNamespace(text="not json {{{")
+    with (
+        patch("backend.ingest._render_page", return_value=(b"\x89PNG", "image/png")),
+        patch(
+            "backend.ingest._downsize_for_vision", return_value=(b"jpeg", "image/jpeg")
+        ),
+        patch(
+            "backend.ingest._client.aio.models.generate_content",
+            new_callable=AsyncMock,
+            return_value=fake,
+        ),
+    ):
+        from backend.ingest import _detect_visual_markup_one_page
+
+        items = await _detect_visual_markup_one_page(b"fake-pdf", 1)
+    assert items == []
+
+
+def test_format_markup_summary_includes_color_when_non_default():
+    from backend.ingest import _format_markup_summary
+
+    items = [
+        {"type": "underline", "color": "red", "text": "deadline"},
+        {"type": "note", "color": "black", "text": "see appendix"},
+    ]
+    out = _format_markup_summary(items)
+    assert "[underline in red: deadline]" in out
+    assert "[note: see appendix]" in out  # black drops the color suffix
+    assert "Visual markup on this page" in out
+
+
+def test_format_markup_summary_empty_for_no_items():
+    from backend.ingest import _format_markup_summary
+
+    assert _format_markup_summary([]) == ""
+
+
+async def test_collect_visual_markup_runs_on_pages_with_text():
+    """Pages with non-empty body text get the markup pass; empty pages don't."""
+    pages = ["page one body text", "", "page three body text"]
+    captured: list[int] = []
+
+    async def fake_detect(_pdf, page_num):
+        captured.append(page_num)
+        return (
+            [{"type": "underline", "color": "red", "text": f"mark p{page_num}"}]
+            if page_num == 1
+            else []
+        )
+
+    with patch(
+        "backend.ingest._detect_visual_markup_one_page", side_effect=fake_detect
+    ):
+        from backend.ingest import _collect_visual_markup
+
+        out = await _collect_visual_markup(b"fake-pdf", pages)
+
+    assert sorted(captured) == [1, 3]
+    assert 1 in out
+    assert 3 not in out  # page 3 returned empty list
+
+
 def test_extract_text_no_annotations_unchanged():
     """Regression guard: PDFs without annotations produce the same body text
     as before (no spurious annotation tag appended)."""
@@ -305,6 +420,11 @@ async def test_run_ingest_ocr_on_no_empty_pages_skips_vision(pool):
             return_value=[0.1] * 768,
         ),
         patch("backend.ingest._ocr_one_page", new_callable=AsyncMock) as m_ocr_one,
+        patch(
+            "backend.ingest._detect_visual_markup_one_page",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
     ):
         events = [e async for e in run_ingest(b"pdf-bytes", ocr_scanned=True)]
     m_ocr_one.assert_not_awaited()
@@ -328,6 +448,11 @@ async def test_run_ingest_ocr_on_with_empty_pages_calls_vision(pool):
             return_value=[0.1] * 768,
         ),
         patch("backend.ingest._ocr_one_page", side_effect=fake_ocr),
+        patch(
+            "backend.ingest._detect_visual_markup_one_page",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
     ):
         events = [e async for e in run_ingest(b"pdf-bytes", ocr_scanned=True)]
 

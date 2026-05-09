@@ -122,6 +122,22 @@ _OCR_PROMPT = (
     "If the image contains no readable text, respond with exactly the word 'unreadable'."
 )
 
+_VISUAL_MARKUP_PROMPT = (
+    "Look at this page and identify HAND-DRAWN markup added on top of the printed text. "
+    "Hand-drawn markup includes: pen/pencil underlines (visible ink strokes, often imperfect), "
+    "marker highlights (translucent yellow/pink/orange overlay on text), circles or boxes "
+    "drawn around words, arrows pointing at text, stars or check marks added by hand, "
+    "margin notes written in by hand, and hand-drawn strikethroughs. "
+    "Do NOT report typographic emphasis (bold, italic, typeset underlines), bullets, page "
+    "borders, or anything that's part of the original typesetting. "
+    "For each item, output JSON: "
+    '{"markup": [{"type": "underline" | "highlight" | "circle" | "arrow" | "star" | "note" | "strikethrough" | "box", '
+    '"color": "red" | "blue" | "green" | "yellow" | "orange" | "black" | "purple" | "other", '
+    '"text": "verbatim text being marked or handwritten"}, ...]} '
+    'If the page has no hand-drawn markup, output {"markup": []}. '
+    "Do not include commentary or markdown fences."
+)
+
 
 def _ext_to_mime(ext: str) -> str:
     return {
@@ -478,6 +494,144 @@ async def _ocr_one_page(pdf_bytes: bytes, page_num: int) -> str:
     return ""
 
 
+async def _detect_visual_markup_one_page(pdf_bytes: bytes, page_num: int) -> list[dict]:
+    """Render a page and ask Vision to identify hand-drawn markup (underlines,
+    highlights, circles, margin notes) and the text being marked. Returns a
+    list of {type, color, text} dicts; empty list on any failure (one bad
+    page never aborts the ingest)."""
+    import json as _json
+
+    try:
+        page_bytes, page_mime = _render_page(pdf_bytes, page_num, _OCR_PAGE_DPI)
+    except Exception as exc:
+        logger.warning("Markup render failed for page %d: %s", page_num, exc)
+        return []
+
+    send_bytes, send_mime = _downsize_for_vision(page_bytes)
+    if not send_mime:
+        send_mime = page_mime
+
+    for attempt in range(_MAX_RETRIES):
+        try:
+            r = await _client.aio.models.generate_content(
+                model=_VISION_MODEL,
+                contents=[
+                    types.Part.from_bytes(data=send_bytes, mime_type=send_mime),
+                    _VISUAL_MARKUP_PROMPT,
+                ],
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                ),
+            )
+            raw = (r.text or "").strip()
+            if not raw:
+                return []
+            try:
+                parsed = _json.loads(raw)
+            except Exception as exc:
+                logger.warning(
+                    "Markup JSON parse failed for page %d: %s", page_num, exc
+                )
+                return []
+            if not isinstance(parsed, dict):
+                return []
+            items = parsed.get("markup")
+            if not isinstance(items, list):
+                return []
+            out: list[dict] = []
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                txt = it.get("text")
+                ty = it.get("type")
+                col = it.get("color")
+                if (
+                    isinstance(txt, str)
+                    and txt.strip()
+                    and isinstance(ty, str)
+                    and ty.strip()
+                ):
+                    out.append(
+                        {
+                            "type": ty.strip(),
+                            "color": (col or "").strip()
+                            if isinstance(col, str)
+                            else "",
+                            "text": txt.strip(),
+                        }
+                    )
+            return out
+        except Exception as exc:
+            if attempt < _MAX_RETRIES - 1 and _is_retryable(exc):
+                wait = _RETRY_BASE**attempt
+                logger.warning(
+                    "Markup call failed for page %d (%s); retrying in %.0fs",
+                    page_num,
+                    exc,
+                    wait,
+                )
+                await asyncio.sleep(wait)
+                continue
+            logger.warning(
+                "Markup gave up for page %d after %d attempts: %s",
+                page_num,
+                attempt + 1,
+                exc,
+            )
+            return []
+    return []
+
+
+def _format_markup_summary(items: list[dict]) -> str:
+    """Format detected markup items into a bracketed string suitable for
+    appending to the page text. Mirrors the layered-annotation summary so the
+    LLM sees the same shape regardless of whether the source was a PDF
+    annotation object or a Vision-detected hand-drawn mark."""
+    if not items:
+        return ""
+    parts: list[str] = []
+    for it in items:
+        ty = (it.get("type") or "marked").strip().lower()
+        col = (it.get("color") or "").strip().lower()
+        txt = (it.get("text") or "").strip()
+        if not txt:
+            continue
+        if col and col not in ("other", "black"):
+            parts.append(f"[{ty} in {col}: {txt}]")
+        else:
+            parts.append(f"[{ty}: {txt}]")
+    if not parts:
+        return ""
+    return "\n\n[Visual markup on this page: " + " ".join(parts) + "]"
+
+
+async def _collect_visual_markup(
+    pdf_bytes: bytes, pages: list[str]
+) -> dict[int, list[dict]]:
+    """Run hand-drawn markup detection on every page that has body text. The
+    point of this pass is to catch markup BAKED INTO the page raster (Path 3),
+    so it's complementary to `_format_annotations`'s layered-annotation reader.
+    Pages with no body text are skipped — they go through OCR if requested."""
+    targets = [i + 1 for i, p in enumerate(pages) if p.strip()]
+    if not targets:
+        return {}
+    logger.info("Detecting visual markup on %d page(s)", len(targets))
+    results = await _gather_bounded(
+        [_detect_visual_markup_one_page(pdf_bytes, n) for n in targets],
+        _GEMINI_CONCURRENCY,
+    )
+    out: dict[int, list[dict]] = {}
+    for page_num, items in zip(targets, results):
+        if items:
+            out[page_num] = items
+    logger.info(
+        "Visual markup detected on %d/%d pages",
+        len(out),
+        len(targets),
+    )
+    return out
+
+
 async def _ocr_empty_pages(
     pdf_bytes: bytes, pages: list[str]
 ) -> tuple[list[str], set[int]]:
@@ -584,6 +738,25 @@ async def run_ingest(
             }
             pages, ocr_page_set = await _ocr_empty_pages(pdf_bytes, pages)
             text = "\n\n".join(p for p in pages if p.strip())
+
+        # Path 3: detect hand-drawn markup baked into the page raster
+        # (underlines, highlights, margin notes, circles). Layered PDF
+        # annotations are already captured by `_format_annotations` inside
+        # `_extract_text`; this pass catches the case where the markup is
+        # flattened into the rendered page image.
+        marked_pages = sum(1 for p in pages if p.strip())
+        if marked_pages:
+            yield {
+                "status": "markup",
+                "message": f"Scanning {marked_pages} page(s) for hand-drawn markup…",
+            }
+            markup_by_page = await _collect_visual_markup(pdf_bytes, pages)
+            for page_num, items in markup_by_page.items():
+                summary = _format_markup_summary(items)
+                if summary:
+                    pages[page_num - 1] = pages[page_num - 1] + summary
+            if markup_by_page:
+                text = "\n\n".join(p for p in pages if p.strip())
 
     yield {"status": "chunking", "message": "Splitting into chunks…"}
     total_tokens = len(_tokenizer.encode(text))
