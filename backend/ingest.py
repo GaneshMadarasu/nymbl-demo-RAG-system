@@ -228,7 +228,10 @@ def _render_page(pdf_bytes: bytes, page_num: int, dpi: int) -> tuple[bytes, str]
         doc.close()
 
 
-def _extract_images(pdf_bytes: bytes) -> list[tuple[int, bytes, str]]:
+def _extract_images(
+    pdf_bytes: bytes,
+    skip_pages: set[int] | None = None,
+) -> list[tuple[int, bytes, str]]:
     """Extract paintings/figures from a PDF in two stages.
 
     Stage 1 — embedded images: walk every page's image XRefs and use the raw
@@ -241,6 +244,7 @@ def _extract_images(pdf_bytes: bytes) -> list[tuple[int, bytes, str]]:
     pages where PyMuPDF reports no embedded images at all.
 
     Returns list of (page_num, image_bytes, mime_type)."""
+    skip_pages = skip_pages or set()
     t0 = time.monotonic()
     doc = fitz.open(stream=BytesIO(pdf_bytes), filetype="pdf")
     images: list[tuple[int, bytes, str]] = []
@@ -296,6 +300,8 @@ def _extract_images(pdf_bytes: bytes) -> list[tuple[int, bytes, str]]:
     for page_num, page in enumerate(doc, 1):
         if page_num in pages_with_extracted:
             continue
+        if page_num in skip_pages:
+            continue  # caller (e.g. OCR pipeline) already handled this page
         text_len = len(page.get_text().strip())
         if text_len > _PAGE_TEXT_FALLBACK_LIMIT:
             continue  # text-heavy page with no figures — skip

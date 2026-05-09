@@ -246,3 +246,45 @@ async def test_ocr_empty_pages_no_empty_pages_no_calls():
     assert updated == pages
     assert ocr_set == set()
     assert lines_by_page == {}
+
+
+def test_extract_images_skip_pages_blocks_stage2():
+    """Build a 3-page PDF where pages 2 and 3 have no embedded images and
+    very little text — both would normally trigger stage-2 full-page render.
+    With skip_pages={2}, only page 3 should produce a stage-2 render."""
+    import fitz
+    from backend.ingest import _extract_images
+
+    doc = fitz.open()
+    p1 = doc.new_page()
+    p1.insert_text((72, 72), "This page has plenty of substantive text " * 5)
+    p2 = doc.new_page()  # empty / sparse → would trigger stage 2
+    p3 = doc.new_page()  # empty / sparse → would trigger stage 2
+    pdf_bytes = doc.write()
+    doc.close()
+
+    # Without skipping, both 2 and 3 would be rendered
+    all_imgs = _extract_images(pdf_bytes)
+    pages_extracted = {p for p, _, _ in all_imgs}
+    assert 2 in pages_extracted and 3 in pages_extracted
+
+    # With skip_pages={2}, only page 3 produces a stage-2 render
+    skipped = _extract_images(pdf_bytes, skip_pages={2})
+    pages_skipped = {p for p, _, _ in skipped}
+    assert 2 not in pages_skipped
+    assert 3 in pages_skipped
+
+
+def test_extract_images_default_skip_pages_is_none():
+    """Calling without skip_pages keeps existing behavior (regression guard)."""
+    import fitz
+    from backend.ingest import _extract_images
+
+    doc = fitz.open()
+    doc.new_page().insert_text((72, 72), "x")
+    pdf_bytes = doc.write()
+    doc.close()
+
+    # Should not raise; should return a list (may or may not have images)
+    out = _extract_images(pdf_bytes)
+    assert isinstance(out, list)
