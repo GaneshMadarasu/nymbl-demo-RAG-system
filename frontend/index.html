@@ -145,6 +145,10 @@
         <input type="checkbox" id="ingest-modal-ocr">
         <span>Hand Written?</span>
       </label>
+      <label style="display:flex; align-items:center; gap:8px; margin: 12px 0; cursor:pointer;">
+        <input type="checkbox" id="ingest-modal-markup">
+        <span>Detect hand-drawn markup <em style="opacity:0.6; font-size:0.85em;">(Vision call per page — slow on long PDFs)</em></span>
+      </label>
     </div>
     <div class="modal-actions">
       <button class="modal-btn cancel" id="ingest-modal-cancel">Cancel</button>
@@ -277,6 +281,8 @@
     formData.append('process_images', processImages ? 'true' : 'false');
     const ocrScanned = document.getElementById('ingest-modal-ocr').checked;
     formData.append('ocr_scanned', ocrScanned ? 'true' : 'false');
+    const detectMarkup = document.getElementById('ingest-modal-markup').checked;
+    formData.append('detect_markup', detectMarkup ? 'true' : 'false');
     try {
       const res = await fetch('/ingest', { method: 'POST', body: formData });
       if (!res.ok) { const err = await res.json(); throw new Error(err.detail || 'Upload failed'); }

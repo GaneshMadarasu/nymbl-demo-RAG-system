@@ -705,6 +705,7 @@ async def run_ingest(
     pdf_bytes: bytes,
     process_images: bool = True,
     ocr_scanned: bool = False,
+    detect_markup: bool = False,
 ) -> AsyncGenerator[dict, None]:
     pool = await db.get_pool()
     doc_id = _doc_id(pdf_bytes)
@@ -739,11 +740,12 @@ async def run_ingest(
             pages, ocr_page_set = await _ocr_empty_pages(pdf_bytes, pages)
             text = "\n\n".join(p for p in pages if p.strip())
 
-        # Path 3: detect hand-drawn markup baked into the page raster
-        # (underlines, highlights, margin notes, circles). Layered PDF
-        # annotations are already captured by `_format_annotations` inside
-        # `_extract_text`; this pass catches the case where the markup is
-        # flattened into the rendered page image.
+    # Path 3: detect hand-drawn markup baked into the page raster
+    # (underlines, highlights, margin notes, circles). Independent of OCR
+    # because the cost profile is very different — OCR is cheap (only
+    # empty pages), markup detection is one Vision call per text page.
+    # Gated on its own opt-in toggle so the user controls the cost.
+    if detect_markup:
         marked_pages = sum(1 for p in pages if p.strip())
         if marked_pages:
             yield {

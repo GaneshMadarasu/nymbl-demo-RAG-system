@@ -424,10 +424,65 @@ async def test_run_ingest_ocr_on_no_empty_pages_skips_vision(pool):
             "backend.ingest._detect_visual_markup_one_page",
             new_callable=AsyncMock,
             return_value=[],
-        ),
+        ) as m_markup,
     ):
         events = [e async for e in run_ingest(b"pdf-bytes", ocr_scanned=True)]
     m_ocr_one.assert_not_awaited()
+    # Markup detection is gated on detect_markup, NOT ocr_scanned
+    m_markup.assert_not_awaited()
+    assert any(e["status"] == "done" for e in events)
+
+
+async def test_run_ingest_detect_markup_runs_vision_pass(pool):
+    """detect_markup=True should fire the visual-markup pass independently
+    of ocr_scanned."""
+    fake_pages = ["page one substantive text " * 10, "page two substantive text " * 10]
+    fake_text = "\n\n".join(fake_pages)
+
+    async def fake_markup(_pdf, page_num):
+        return [{"type": "underline", "color": "red", "text": f"mark p{page_num}"}]
+
+    with (
+        patch("backend.ingest.db.get_pool", new_callable=AsyncMock, return_value=pool),
+        patch("backend.ingest._extract_text", return_value=(fake_text, fake_pages)),
+        patch("backend.ingest._extract_images", return_value=[]),
+        patch(
+            "backend.ingest._embed_one",
+            new_callable=AsyncMock,
+            return_value=[0.1] * 768,
+        ),
+        patch(
+            "backend.ingest._detect_visual_markup_one_page", side_effect=fake_markup
+        ) as m_markup,
+    ):
+        events = [e async for e in run_ingest(b"pdf-bytes", detect_markup=True)]
+    statuses = [e["status"] for e in events]
+    assert "markup" in statuses
+    assert m_markup.await_count == 2  # one call per text page
+
+
+async def test_run_ingest_detect_markup_off_skips_vision(pool):
+    """Default detect_markup=False keeps the markup pass dormant."""
+    fake_pages = ["page one substantive text " * 10]
+    fake_text = "\n\n".join(fake_pages)
+
+    with (
+        patch("backend.ingest.db.get_pool", new_callable=AsyncMock, return_value=pool),
+        patch("backend.ingest._extract_text", return_value=(fake_text, fake_pages)),
+        patch("backend.ingest._extract_images", return_value=[]),
+        patch(
+            "backend.ingest._embed_one",
+            new_callable=AsyncMock,
+            return_value=[0.1] * 768,
+        ),
+        patch(
+            "backend.ingest._detect_visual_markup_one_page",
+            new_callable=AsyncMock,
+            return_value=[],
+        ) as m_markup,
+    ):
+        events = [e async for e in run_ingest(b"pdf-bytes")]
+    m_markup.assert_not_awaited()
     assert any(e["status"] == "done" for e in events)
 
 
