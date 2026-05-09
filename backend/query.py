@@ -87,9 +87,7 @@ async def _rewrite_query(question: str, history: list[dict]) -> str:
         f"Follow-up question: {question}"
     )
     try:
-        r = await _client.aio.models.generate_content(
-            model=_RERANK_MODEL, contents=prompt
-        )
+        r = await _client.aio.models.generate_content(model=_GEN_MODEL, contents=prompt)
         rewritten = (r.text or question).strip()
         logger.info("Query rewritten: %r → %r", question, rewritten)
         return rewritten
