@@ -7,7 +7,7 @@ Single-document RAG system built for the Nymbl technical assessment: upload a PD
 | Layer | Technology |
 |-------|-----------|
 | PDF extraction | PyMuPDF (`fitz`) — text + embedded images |
-| OCR (opt-in) | Gemini 2.5 Flash with structured JSON — line-level transcription + bboxes for scanned/handwritten pages |
+| OCR (opt-in) | Gemini 2.5 Flash — verbatim transcription of scanned/handwritten pages |
 | Image captioning | Gemini 2.5 Flash Vision (1-2 sentence captions per image at ingest) |
 | Embeddings | `gemini-embedding-2` (768-dim) — text chunks AND image captions share the same space |
 | Chunking | tiktoken-aware sentence-boundary splitter |
@@ -72,7 +72,7 @@ Open **http://localhost:8000** in your browser.
 ## Usage
 
 1. Drag a PDF onto the sidebar or click to upload
-2. A modal asks whether to **Process images** (extract figures, caption with Gemini Vision, embed) or do a **Text only** ingest (faster — skips Vision entirely). A separate checkbox enables **OCR scanned pages** for handwritten or scanned PDFs — empty-text pages are rendered and transcribed via Gemini Vision; cited lines are highlighted in yellow in the viewer.
+2. A modal asks whether to **Process images** (extract figures, caption with Gemini Vision, embed) or do a **Text only** ingest (faster — skips Vision entirely). A separate checkbox enables **OCR scanned pages** for handwritten or scanned PDFs — empty-text pages are rendered and transcribed via Gemini Vision and the transcript flows through the normal chunker/embedder/retriever. Citations on scanned pages navigate the viewer to the right page (no in-page highlight on scans, since there's no text layer to anchor to).
 3. Wait for the ingestion progress bar to complete
 4. Type a question and press Enter or click →
 5. A live status line shows each RAG stage: *Embedding query… → Searching database… → Generating answer…*
@@ -151,7 +151,7 @@ A simpler-on-paper architecture would skip Vision captioning and embed image byt
 Images are downsized to 1024 px on the longest side and re-encoded as JPEG quality-85 before being sent to Vision — Vision doesn't need full resolution to caption an image, and high-DPI page renders dominate the upload time. A semaphore caps concurrent Gemini calls (caption + embed) at 8: paradoxically faster overall than unlimited `asyncio.gather`, because it avoids 429s and the 2/4/8/16 s exponential-backoff retries that follow them.
 
 **OCR via Gemini Vision (opt-in)**
-Scanned and handwritten PDFs have no embedded text — PyMuPDF returns empty pages and the index ends up empty. When the user enables "OCR scanned pages" at upload, every page where PyMuPDF returned ≤ 50 chars is rendered at 200 DPI and sent to Gemini 2.5 Flash with `response_mime_type="application/json"` to get back structured `[{text, box}, ...]` data — text feeds the chunker normally, bboxes get stored in a separate `ocr_lines` table. Tesseract was rejected because it's poor at handwriting (the primary case here) and would still need Vision as an escalation, doubling complexity. The viewer transparently switches between text-layer highlighting (typed pages) and bbox-overlay highlighting (OCR'd pages) per page, so a mixed PDF works without a second code path.
+Scanned and handwritten PDFs have no embedded text — PyMuPDF returns empty pages and the index ends up empty. When the user enables "OCR scanned pages" at upload, every page where PyMuPDF returned ≤ 50 chars is rendered at 200 DPI and sent to Gemini 2.5 Flash with a verbatim-transcription prompt; the returned text is plumbed straight into the existing chunker/embedder/retriever, indistinguishable from natively-extracted text downstream. Tesseract was rejected because it's poor at handwriting (the primary case here) and would still need Vision as an escalation, doubling complexity. Citations on scanned pages navigate the viewer to the right page but skip the in-page highlight overlay — there's no text layer to anchor against, and the bbox-overlay path was removed after it added meaningful complexity (Vision JSON output, a dedicated `ocr_lines` table, viewer overlay rendering) for marginal UX value on a single-document demo.
 
 **Markdown rendering in answers**
 Gemini's responses use markdown — bold headings, bullet lists, inline code. Tokens stream into the bubble as they arrive and are re-rendered through marked.js on every token, so the answer appears progressively as formatted text rather than raw `**` syntax. On the `done` event, `renderFinalAnswer` re-parses the full text and replaces inline `[Chunk N]` references with interactive citation badges; this final pass runs once instead of per-token, so citations only become clickable when the answer is complete.

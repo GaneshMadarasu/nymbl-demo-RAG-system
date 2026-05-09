@@ -1,4 +1,3 @@
-import json as _json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from backend.ingest import _doc_id, run_ingest
@@ -71,15 +70,8 @@ def test_render_page_produces_png_bytes():
     assert len(img_bytes) > 1000
 
 
-async def test_ocr_one_page_parses_valid_json():
-    fake_response = SimpleNamespace(
-        text=_json.dumps(
-            [
-                {"text": "Hello world", "box": [10, 20, 30, 800]},
-                {"text": "Second line", "box": [40, 20, 60, 800]},
-            ]
-        )
-    )
+async def test_ocr_one_page_returns_transcribed_text():
+    fake_response = SimpleNamespace(text="Hello world\nSecond line")
     with (
         patch(
             "backend.ingest._render_page",
@@ -97,15 +89,12 @@ async def test_ocr_one_page_parses_valid_json():
     ):
         from backend.ingest import _ocr_one_page
 
-        text, lines = await _ocr_one_page(b"fake-pdf", 1)
+        text = await _ocr_one_page(b"fake-pdf", 1)
     assert text == "Hello world\nSecond line"
-    assert len(lines) == 2
-    assert lines[0]["text"] == "Hello world"
-    assert lines[0]["box"] == [10, 20, 30, 800]
 
 
-async def test_ocr_one_page_handles_empty_array():
-    fake_response = SimpleNamespace(text="[]")
+async def test_ocr_one_page_handles_unreadable_response():
+    fake_response = SimpleNamespace(text="unreadable")
     with (
         patch("backend.ingest._render_page", return_value=(b"\x89PNG", "image/png")),
         patch(
@@ -119,68 +108,16 @@ async def test_ocr_one_page_handles_empty_array():
     ):
         from backend.ingest import _ocr_one_page
 
-        text, lines = await _ocr_one_page(b"fake-pdf", 1)
+        text = await _ocr_one_page(b"fake-pdf", 1)
     assert text == ""
-    assert lines == []
-
-
-async def test_ocr_one_page_handles_malformed_json():
-    fake_response = SimpleNamespace(text="not json at all {{{")
-    with (
-        patch("backend.ingest._render_page", return_value=(b"\x89PNG", "image/png")),
-        patch(
-            "backend.ingest._downsize_for_vision", return_value=(b"jpeg", "image/jpeg")
-        ),
-        patch(
-            "backend.ingest._client.aio.models.generate_content",
-            new_callable=AsyncMock,
-            return_value=fake_response,
-        ),
-    ):
-        from backend.ingest import _ocr_one_page
-
-        text, lines = await _ocr_one_page(b"fake-pdf", 1)
-    assert text == ""
-    assert lines == []
-
-
-async def test_ocr_one_page_drops_lines_missing_box():
-    fake_response = SimpleNamespace(
-        text=_json.dumps(
-            [
-                {"text": "Has box", "box": [0, 0, 10, 100]},
-                {"text": "Missing box"},
-                {"text": "Has box too", "box": [20, 0, 30, 100]},
-            ]
-        )
-    )
-    with (
-        patch("backend.ingest._render_page", return_value=(b"\x89PNG", "image/png")),
-        patch(
-            "backend.ingest._downsize_for_vision", return_value=(b"jpeg", "image/jpeg")
-        ),
-        patch(
-            "backend.ingest._client.aio.models.generate_content",
-            new_callable=AsyncMock,
-            return_value=fake_response,
-        ),
-    ):
-        from backend.ingest import _ocr_one_page
-
-        text, lines = await _ocr_one_page(b"fake-pdf", 1)
-    # Text preserves all three lines; lines list drops the one without bbox
-    assert "Has box" in text and "Missing box" in text and "Has box too" in text
-    assert len(lines) == 2
-    assert all("box" in line for line in lines)
 
 
 async def test_ocr_one_page_render_failure_returns_empty():
     with patch("backend.ingest._render_page", side_effect=RuntimeError("render bomb")):
         from backend.ingest import _ocr_one_page
 
-        text, lines = await _ocr_one_page(b"fake-pdf", 1)
+        text = await _ocr_one_page(b"fake-pdf", 1)
     assert text == ""
-    assert lines == []
 
 
 async def test_ocr_empty_pages_only_ocrs_below_threshold():
@@ -194,14 +131,12 @@ async def test_ocr_empty_pages_only_ocrs_below_threshold():
 
     async def fake_ocr(_pdf, page_num):
         captured_pages.append(page_num)
-        return f"OCR text page {page_num}", [
-            {"text": f"OCR text page {page_num}", "box": [0, 0, 10, 100]}
-        ]
+        return f"OCR text page {page_num}"
 
     with patch("backend.ingest._ocr_one_page", side_effect=fake_ocr):
         from backend.ingest import _ocr_empty_pages
 
-        updated, ocr_set, lines_by_page = await _ocr_empty_pages(b"pdf", pages)
+        updated, ocr_set = await _ocr_empty_pages(b"pdf", pages)
 
     assert sorted(captured_pages) == [2, 3]
     assert ocr_set == {2, 3}
@@ -209,7 +144,6 @@ async def test_ocr_empty_pages_only_ocrs_below_threshold():
     assert updated[1] == "OCR text page 2"
     assert updated[2] == "OCR text page 3"
     assert updated[3] == pages[3]
-    assert set(lines_by_page.keys()) == {2, 3}
 
 
 async def test_ocr_empty_pages_failure_isolated():
@@ -217,21 +151,18 @@ async def test_ocr_empty_pages_failure_isolated():
 
     async def fake_ocr(_pdf, page_num):
         if page_num == 2:
-            return "", []  # simulate failure -> empty
-        return f"page {page_num} text", [
-            {"text": f"page {page_num} text", "box": [0, 0, 5, 50]}
-        ]
+            return ""  # simulate failure -> empty
+        return f"page {page_num} text"
 
     with patch("backend.ingest._ocr_one_page", side_effect=fake_ocr):
         from backend.ingest import _ocr_empty_pages
 
-        updated, ocr_set, lines_by_page = await _ocr_empty_pages(b"pdf", pages)
+        updated, ocr_set = await _ocr_empty_pages(b"pdf", pages)
 
     assert updated[0] == "page 1 text"
     assert updated[1] == ""  # failed page kept empty
     assert updated[2] == "page 3 text"
     assert ocr_set == {1, 3}  # only successfully OCR'd pages in the set
-    assert set(lines_by_page.keys()) == {1, 3}
 
 
 async def test_ocr_empty_pages_no_empty_pages_no_calls():
@@ -240,12 +171,11 @@ async def test_ocr_empty_pages_no_empty_pages_no_calls():
     with patch("backend.ingest._ocr_one_page", fake_ocr):
         from backend.ingest import _ocr_empty_pages
 
-        updated, ocr_set, lines_by_page = await _ocr_empty_pages(b"pdf", pages)
+        updated, ocr_set = await _ocr_empty_pages(b"pdf", pages)
 
     fake_ocr.assert_not_awaited()
     assert updated == pages
     assert ocr_set == set()
-    assert lines_by_page == {}
 
 
 def test_extract_images_skip_pages_blocks_stage2():
@@ -328,15 +258,12 @@ async def test_run_ingest_ocr_on_no_empty_pages_skips_vision(pool):
     assert any(e["status"] == "done" for e in events)
 
 
-async def test_run_ingest_ocr_on_with_empty_pages_calls_vision_and_inserts_lines(pool):
+async def test_run_ingest_ocr_on_with_empty_pages_calls_vision(pool):
     fake_pages = ["", "Substantial typed text on this page " * 5, ""]
     fake_text = "\n\n".join(p for p in fake_pages if p.strip())
 
     async def fake_ocr(_pdf, page_num):
-        return (
-            f"OCR'd text page {page_num} " * 4,
-            [{"text": f"OCR'd text page {page_num}", "box": [0, 0, 10, 100]}],
-        )
+        return f"OCR'd text page {page_num} " * 4
 
     with (
         patch("backend.ingest.db.get_pool", new_callable=AsyncMock, return_value=pool),
@@ -359,10 +286,3 @@ async def test_run_ingest_ocr_on_with_empty_pages_calls_vision_and_inserts_lines
     # _extract_images received skip_pages={1, 3} (the OCR'd pages)
     _, kwargs = m_imgs.call_args
     assert kwargs.get("skip_pages") == {1, 3}
-
-    # ocr_lines were persisted for both pages
-    from backend.db import get_ocr_lines
-
-    assert (await get_ocr_lines(pool, done["doc_id"], 1)) != []
-    assert (await get_ocr_lines(pool, done["doc_id"], 3)) != []
-    assert (await get_ocr_lines(pool, done["doc_id"], 2)) == []

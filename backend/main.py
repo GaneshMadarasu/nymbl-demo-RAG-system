@@ -113,16 +113,6 @@ async def list_images() -> list[dict]:
     return await db.list_doc_images(pool, _state["doc_id"])
 
 
-@app.get("/doc/ocr-lines/{page_num}")
-async def get_ocr_lines_for_page(page_num: int) -> list[dict]:
-    """Return OCR'd lines + bboxes for one page, or [] if the page is not OCR'd
-    (or if no doc is loaded). Viewer fetches this once per cited page."""
-    if not _state["doc_id"]:
-        return []
-    pool = await db.get_pool()
-    return await db.get_ocr_lines(pool, _state["doc_id"], page_num)
-
-
 @app.get("/image-viewer")
 async def serve_image_viewer() -> FileResponse:
     return FileResponse(

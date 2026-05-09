@@ -56,11 +56,13 @@ async def test_ocr_real_vision_on_synthetic_scan(pool):
     done = next(e for e in events if e["status"] == "done")
     assert done["chunk_count"] >= 2
 
-    # ocr_lines should exist for page 1 (the rendered/scanned page)
-    from backend.db import get_ocr_lines
+    # At least one chunk should mention something from the rendered text on
+    # page 1 — proves Vision OCR transcribed it and chunking absorbed the
+    # transcript into the corpus.
+    from backend.db import search_chunks
+    from backend.ingest import _embed_one
 
-    page1_lines = await get_ocr_lines(pool, done["doc_id"], 1)
-    assert len(page1_lines) > 0
-    # At least one line should mention something from the rendered text
-    all_text = " ".join(L["text"].lower() for L in page1_lines)
+    q_embed = await _embed_one("kickoff notes Alex Kim")
+    rows = await search_chunks(pool, done["doc_id"], q_embed, "kickoff Alex Kim", k=4)
+    all_text = " ".join((r.get("text") or "").lower() for r in rows)
     assert "kickoff" in all_text or "alex" in all_text or "kim" in all_text

@@ -1,6 +1,5 @@
 import asyncio
 import hashlib
-import json as _json_mod
 import logging
 import time
 from collections.abc import AsyncGenerator
@@ -117,12 +116,10 @@ _CAPTION_PROMPT = (
 
 
 _OCR_PROMPT = (
-    "Transcribe ALL visible text in this image (printed and handwritten) as JSON. "
-    "Output an array of objects, one per line of text, in reading order: "
-    '[{"text": "...", "box": [ymin, xmin, ymax, xmax]}, ...] '
-    "Coordinates are normalized 0-1000. Preserve line breaks faithfully. "
-    "Do not include commentary or markdown fences. "
-    "If the image contains no readable text, return []."
+    "Transcribe ALL visible text in this image verbatim (printed and handwritten). "
+    "Preserve line breaks and paragraph structure. "
+    "Do not add commentary, summaries, or explanations — output only the transcribed text. "
+    "If the image contains no readable text, respond with exactly the word 'unreadable'."
 )
 
 
@@ -377,24 +374,22 @@ async def _caption_image(image_bytes: bytes, mime_type: str) -> str:
             return "image"
 
 
-async def _ocr_one_page(pdf_bytes: bytes, page_num: int) -> tuple[str, list[dict]]:
-    """Render a PDF page and OCR it via Gemini Vision with structured JSON output.
+async def _ocr_one_page(pdf_bytes: bytes, page_num: int) -> str:
+    """Render a PDF page and OCR it via Gemini Vision.
 
-    Returns (full_text, lines) where lines is a list of
-    {"text": str, "box": [ymin, xmin, ymax, xmax]} (coords 0-1000).
-    On any failure (render error, malformed JSON, all-retries-exhausted) returns
-    ("", []) so one bad page never aborts the ingest."""
+    Returns the transcribed text. On any failure (render error, "unreadable"
+    response, all-retries-exhausted) returns "" so one bad page never aborts
+    the ingest."""
     try:
         page_bytes, page_mime = _render_page(pdf_bytes, page_num, _OCR_PAGE_DPI)
     except Exception as exc:
         logger.warning("OCR render failed for page %d: %s", page_num, exc)
-        return "", []
+        return ""
 
     send_bytes, send_mime = _downsize_for_vision(page_bytes)
     if not send_mime:
         send_mime = page_mime
 
-    raw_text = ""
     for attempt in range(_MAX_RETRIES):
         try:
             r = await _client.aio.models.generate_content(
@@ -403,12 +398,11 @@ async def _ocr_one_page(pdf_bytes: bytes, page_num: int) -> tuple[str, list[dict
                     types.Part.from_bytes(data=send_bytes, mime_type=send_mime),
                     _OCR_PROMPT,
                 ],
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                ),
             )
             raw_text = (r.text or "").strip()
-            break
+            if not raw_text or raw_text.lower().strip(".!? \"'") == "unreadable":
+                return ""
+            return raw_text
         except Exception as exc:
             if attempt < _MAX_RETRIES - 1 and _is_retryable(exc):
                 wait = _RETRY_BASE**attempt
@@ -426,53 +420,21 @@ async def _ocr_one_page(pdf_bytes: bytes, page_num: int) -> tuple[str, list[dict
                 attempt + 1,
                 exc,
             )
-            return "", []
-
-    if not raw_text or raw_text.lower().strip(".!? \"'") == "unreadable":
-        return "", []
-
-    try:
-        parsed = _json_mod.loads(raw_text)
-    except Exception as exc:
-        logger.warning("OCR JSON parse failed for page %d: %s", page_num, exc)
-        return "", []
-
-    if not isinstance(parsed, list):
-        return "", []
-
-    text_parts: list[str] = []
-    lines: list[dict] = []
-    for entry in parsed:
-        if not isinstance(entry, dict):
-            continue
-        line_text = entry.get("text")
-        if not isinstance(line_text, str) or not line_text.strip():
-            continue
-        text_parts.append(line_text)
-        box = entry.get("box")
-        if (
-            isinstance(box, list)
-            and len(box) == 4
-            and all(isinstance(v, (int, float)) for v in box)
-        ):
-            lines.append({"text": line_text, "box": [int(v) for v in box]})
-
-    return "\n".join(text_parts), lines
+            return ""
+    return ""
 
 
 async def _ocr_empty_pages(
     pdf_bytes: bytes, pages: list[str]
-) -> tuple[list[str], set[int], dict[int, list[dict]]]:
+) -> tuple[list[str], set[int]]:
     """For each page in `pages` whose stripped text length is below the
     threshold, OCR it via Gemini Vision. Returns (updated_pages,
-    ocr_page_nums, ocr_lines_by_page).
+    ocr_page_nums).
 
     - updated_pages: copy of `pages` with successfully-OCR'd entries replaced
       by the transcribed text; failed pages remain as their original empty
       text.
     - ocr_page_nums: 1-indexed pages where OCR returned non-empty text.
-    - ocr_lines_by_page: {page_num: [{"text", "box"}, ...]} for pages with
-      bbox lines, used to populate the ocr_lines table for the viewer.
     """
     targets = [
         i + 1
@@ -480,7 +442,7 @@ async def _ocr_empty_pages(
         if len(p.strip()) <= _OCR_EMPTY_PAGE_THRESHOLD
     ]
     if not targets:
-        return list(pages), set(), {}
+        return list(pages), set()
 
     logger.info("Running OCR on %d empty/sparse page(s)", len(targets))
     results = await _gather_bounded(
@@ -490,22 +452,19 @@ async def _ocr_empty_pages(
 
     updated = list(pages)
     ocr_set: set[int] = set()
-    lines_by_page: dict[int, list[dict]] = {}
 
-    for page_num, (text, lines) in zip(targets, results):
+    for page_num, text in zip(targets, results):
         if not text:
             continue
         updated[page_num - 1] = text
         ocr_set.add(page_num)
-        if lines:
-            lines_by_page[page_num] = lines
 
     logger.info(
         "OCR completed: %d/%d pages produced text",
         len(ocr_set),
         len(targets),
     )
-    return updated, ocr_set, lines_by_page
+    return updated, ocr_set
 
 
 def _parent_texts(chunks: list[str]) -> list[str]:
@@ -560,7 +519,6 @@ async def run_ingest(
     text, pages = await loop.run_in_executor(None, _extract_text, pdf_bytes)
 
     ocr_page_set: set[int] = set()
-    ocr_lines_by_page: dict[int, list[dict]] = {}
     if ocr_scanned:
         empty_count = sum(
             1 for p in pages if len(p.strip()) <= _OCR_EMPTY_PAGE_THRESHOLD
@@ -570,9 +528,7 @@ async def run_ingest(
                 "status": "ocr",
                 "message": f"OCRing {empty_count} scanned page(s)…",
             }
-            pages, ocr_page_set, ocr_lines_by_page = await _ocr_empty_pages(
-                pdf_bytes, pages
-            )
+            pages, ocr_page_set = await _ocr_empty_pages(pdf_bytes, pages)
             text = "\n\n".join(p for p in pages if p.strip())
 
     yield {"status": "chunking", "message": "Splitting into chunks…"}
@@ -606,8 +562,6 @@ async def run_ingest(
         )
     ]
     await db.insert_chunks(pool, doc_id, rows)
-    if ocr_lines_by_page:
-        await db.insert_ocr_lines(pool, doc_id, ocr_lines_by_page)
     text_chunk_count = total
 
     image_chunk_count = 0
