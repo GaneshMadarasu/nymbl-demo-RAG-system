@@ -72,7 +72,8 @@ Open **http://localhost:8000** in your browser.
 1. Drag a PDF onto the sidebar or click to upload
 2. Wait for the ingestion progress bar to complete
 3. Type a question and press Enter or click →
-4. The answer streams back with `§ Chunk N` citation pills — hover for a text preview, click to open the PDF viewer with the chunk highlighted in yellow
+4. A live status line shows each RAG stage: *Embedding query… → Searching database… → Generating answer…*
+5. The answer streams in as rendered markdown; on completion, `[N]` citation badges are wired to `§ Chunk N` pills — hover for a text preview, click to open the PDF viewer with the chunk highlighted in yellow
 
 If the document doesn't contain enough information to answer, the system responds: *"I don't know."*
 
@@ -132,7 +133,10 @@ Logs write to both the console and `logs/app.log`. The file handler rotates at 5
 Clicking a citation pill opens a separate viewer page (`/viewer`) that renders the full document via PDF.js and highlights the cited chunk in yellow. The chunk's page number is stored in the database at ingest time (by scanning each PDF page with PyMuPDF and matching the chunk text), so the viewer navigates directly to the right page rather than scanning the whole document at query time.
 
 **Markdown rendering in answers**
-Gemini's responses use markdown — bold headings, bullet lists, inline code. The chat renders these via marked.js rather than showing raw syntax like `**`. Chunk citations (`[Chunk N]` or `[Chunk N, Chunk M, ...]`) are extracted from the markdown source before parsing and replaced with interactive pill elements; the surrounding text is then parsed with marked.js and set as innerHTML. This order (citations first, then markdown) avoids marked.js mis-interpreting bracket syntax as link references.
+Gemini's responses use markdown — bold headings, bullet lists, inline code. Tokens stream into the bubble as they arrive and are re-rendered through marked.js on every token, so the answer appears progressively as formatted text rather than raw `**` syntax. On the `done` event, `renderFinalAnswer` re-parses the full text and replaces inline `[Chunk N]` references with interactive citation badges; this final pass runs once instead of per-token, so citations only become clickable when the answer is complete.
+
+**RAG pipeline status indicator**
+The backend emits `{"type": "status", "text": "..."}` SSE events before each slow step (`Embedding query…`, `Searching database…`, `Generating answer…`). The chat shows this next to the spinner so the user sees what the system is doing instead of staring at an idle indicator. The status is replaced by the streamed answer as soon as the first generation token arrives.
 
 **Cross-page chunk highlighting**
 A single chunk can span two PDF pages. The viewer highlights up to three pages: the stored page (always), the page before it (in case the chunk's real start is there due to math-heavy openings that confuse the page-finder), and the page after (in case the chunk spills over). Each direction uses a different strategy: the target page uses substring anchors then word-sequence matching; the preceding page searches for the chunk start working forward; the following page anchors from the chunk's end working backward, with a `localAnchors` fallback that finds words present in both the chunk text and the page text. This fallback is necessary because PyMuPDF (used at ingest) and PDF.js (used in the browser) extract math and symbols differently, so normalized forms can diverge — shared plain-English words are always reliable anchors regardless of extraction differences.
