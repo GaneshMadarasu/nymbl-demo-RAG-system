@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import json as _json_mod
 import logging
 import time
 from collections.abc import AsyncGenerator
@@ -112,6 +113,16 @@ _CAPTION_PROMPT = (
     "ignore page numbers, headers, footers, and surrounding caption text. "
     "For a diagram, chart, or schematic, focus on what it conveys and any axis labels or "
     "key annotations. Be specific and factual."
+)
+
+
+_OCR_PROMPT = (
+    "Transcribe ALL visible text in this image (printed and handwritten) as JSON. "
+    "Output an array of objects, one per line of text, in reading order: "
+    '[{"text": "...", "box": [ymin, xmin, ymax, xmax]}, ...] '
+    "Coordinates are normalized 0-1000. Preserve line breaks faithfully. "
+    "Do not include commentary or markdown fences. "
+    "If the image contains no readable text, return []."
 )
 
 
@@ -358,6 +369,89 @@ async def _caption_image(image_bytes: bytes, mime_type: str) -> str:
                 continue
             logger.warning("Captioning gave up after %d attempts: %s", attempt + 1, exc)
             return "image"
+
+
+async def _ocr_one_page(pdf_bytes: bytes, page_num: int) -> tuple[str, list[dict]]:
+    """Render a PDF page and OCR it via Gemini Vision with structured JSON output.
+
+    Returns (full_text, lines) where lines is a list of
+    {"text": str, "box": [ymin, xmin, ymax, xmax]} (coords 0-1000).
+    On any failure (render error, malformed JSON, all-retries-exhausted) returns
+    ("", []) so one bad page never aborts the ingest."""
+    try:
+        page_bytes, page_mime = _render_page(pdf_bytes, page_num, _OCR_PAGE_DPI)
+    except Exception as exc:
+        logger.warning("OCR render failed for page %d: %s", page_num, exc)
+        return "", []
+
+    send_bytes, send_mime = _downsize_for_vision(page_bytes)
+    if not send_mime:
+        send_mime = page_mime
+
+    raw_text = ""
+    for attempt in range(_MAX_RETRIES):
+        try:
+            r = await _client.aio.models.generate_content(
+                model=_VISION_MODEL,
+                contents=[
+                    types.Part.from_bytes(data=send_bytes, mime_type=send_mime),
+                    _OCR_PROMPT,
+                ],
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                ),
+            )
+            raw_text = (r.text or "").strip()
+            break
+        except Exception as exc:
+            if attempt < _MAX_RETRIES - 1 and _is_retryable(exc):
+                wait = _RETRY_BASE**attempt
+                logger.warning(
+                    "OCR call failed for page %d (%s); retrying in %.0fs",
+                    page_num,
+                    exc,
+                    wait,
+                )
+                await asyncio.sleep(wait)
+                continue
+            logger.warning(
+                "OCR gave up for page %d after %d attempts: %s",
+                page_num,
+                attempt + 1,
+                exc,
+            )
+            return "", []
+
+    if not raw_text or raw_text.lower().strip(".!? \"'") == "unreadable":
+        return "", []
+
+    try:
+        parsed = _json_mod.loads(raw_text)
+    except Exception as exc:
+        logger.warning("OCR JSON parse failed for page %d: %s", page_num, exc)
+        return "", []
+
+    if not isinstance(parsed, list):
+        return "", []
+
+    text_parts: list[str] = []
+    lines: list[dict] = []
+    for entry in parsed:
+        if not isinstance(entry, dict):
+            continue
+        line_text = entry.get("text")
+        if not isinstance(line_text, str) or not line_text.strip():
+            continue
+        text_parts.append(line_text)
+        box = entry.get("box")
+        if (
+            isinstance(box, list)
+            and len(box) == 4
+            and all(isinstance(v, (int, float)) for v in box)
+        ):
+            lines.append({"text": line_text, "box": [int(v) for v in box]})
+
+    return "\n".join(text_parts), lines
 
 
 def _parent_texts(chunks: list[str]) -> list[str]:
