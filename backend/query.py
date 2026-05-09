@@ -27,7 +27,11 @@ SYSTEM_PROMPT = (
     "and use markdown headings, bullet lists, and bold text to structure long answers.\n"
     "If the context doesn't contain enough information, respond with exactly: \"I don't know.\"\n"
     "Cite sources as [Chunk N] inline throughout your answer whenever you use information from that chunk. "
-    "Only cite the exact [Chunk N] numbers listed in the Context section. Never invent or interpolate chunk numbers."
+    "Only cite the exact [Chunk N] numbers listed in the Context section. Never invent or interpolate chunk numbers.\n"
+    "When you reference an artwork, painting, figure, or diagram that is provided as an image chunk "
+    "(one labeled '(image, page N)' in the Context), format the artwork's title or main visual subject "
+    "as a markdown link to image:N — for example: **[Bust portrait of a man](image:5)** [Chunk 5]. "
+    "Use this format ONLY for image chunks. The frontend renders these links as clickable image previews."
 )
 
 _MAX_RETRIES = 6

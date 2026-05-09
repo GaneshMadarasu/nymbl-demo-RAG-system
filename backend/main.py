@@ -103,6 +103,16 @@ async def get_chunk(chunk_index: int) -> dict:
     return result
 
 
+@app.get("/doc/images")
+async def list_images() -> list[dict]:
+    """All image chunks for the loaded doc — used by the chat to fuzzy-link
+    painting names in answers, even when the image chunk wasn't retrieved."""
+    if not _state["doc_id"]:
+        return []
+    pool = await db.get_pool()
+    return await db.list_doc_images(pool, _state["doc_id"])
+
+
 @app.get("/image-viewer")
 async def serve_image_viewer() -> FileResponse:
     return FileResponse(

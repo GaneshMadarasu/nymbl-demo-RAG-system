@@ -200,6 +200,18 @@ async def get_chunk_text(
     return {"text": row["text"], "page_number": row["page_number"]} if row else None
 
 
+async def list_doc_images(pool: asyncpg.Pool, doc_id: str) -> list[dict]:
+    """List all image chunks for a doc with caption + page-text (no bytes)."""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT chunk_index, page_number, text AS caption, parent_text AS page_text "
+            "FROM chunks WHERE doc_id = $1 AND chunk_type = 'image' "
+            "ORDER BY chunk_index",
+            doc_id,
+        )
+    return [dict(r) for r in rows]
+
+
 async def get_chunk_image(
     pool: asyncpg.Pool, doc_id: str, chunk_index: int
 ) -> dict | None:

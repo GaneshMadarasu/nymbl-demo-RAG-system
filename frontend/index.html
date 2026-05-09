@@ -83,6 +83,11 @@
     .pill.pill-image:hover { background: rgba(217, 119, 6, .22); }
     .cite-badge.cite-image { background: rgba(217, 119, 6, .12); color: #d97706; }
     .cite-badge.cite-image:hover { background: rgba(217, 119, 6, .22); }
+    .img-link { display: inline-flex; align-items: center; gap: 4px; background: rgba(217, 119, 6, .12); color: #d97706; text-decoration: none; border-radius: 4px; padding: 1px 6px; font-size: 11px; font-weight: 600; margin: 0 2px; vertical-align: baseline; cursor: pointer; transition: background .2s; }
+    .img-link:hover { background: rgba(217, 119, 6, .22); text-decoration: underline; }
+    .img-title-link { color: #d97706; text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 2px; cursor: pointer; transition: background .15s; border-radius: 2px; padding: 0 1px; }
+    .img-title-link:hover { background: rgba(217, 119, 6, .14); text-decoration-style: solid; }
+    .bubble.rendered strong .img-title-link { color: inherit; }
   </style>
 </head>
 <body>
@@ -119,6 +124,55 @@
   let currentDoc = null;
   let queryActive = false;
   let conversationHistory = [];
+  let docImages = [];  // [{chunk_index, page_number, caption}] — used for fuzzy painting-name linking
+
+  async function fetchDocImages() {
+    try {
+      const r = await fetch('/doc/images');
+      docImages = r.ok ? await r.json() : [];
+    } catch (_) { docImages = []; }
+  }
+
+  // Match a painting/figure name (from a <strong> in the answer) to an image
+  // chunk by substring search of the bolded phrase in the image's caption +
+  // adjacent-page text. Token-overlap was too loose ("painting", "oil" match
+  // everything); substring matching only links when the actual phrase appears.
+  function _norm(s) {
+    return (s || '').toLowerCase().replace(/[‘’“”'"`]/g, '').replace(/\s+/g, ' ').trim();
+  }
+  function _candidatePhrases(text) {
+    // Generate things to search for: full text, text before '(', text inside '(...)'.
+    // Skip phrases shorter than 4 chars (too generic to disambiguate).
+    const phrases = new Set();
+    const full = _norm(text);
+    if (full.length >= 4) phrases.add(full);
+    const m = text.match(/^([^(]+)\(([^)]+)\)/);
+    if (m) {
+      const before = _norm(m[1]); if (before.length >= 4) phrases.add(before);
+      const inside = _norm(m[2]); if (inside.length >= 4) phrases.add(inside);
+    }
+    return [...phrases];
+  }
+  function matchImageByName(text, images) {
+    if (images.length === 0) return null;
+    const phrases = _candidatePhrases(text);
+    if (phrases.length === 0) return null;
+    for (const phrase of phrases) {
+      const hits = [];
+      for (const img of images) {
+        const corpus = _norm((img.caption || '') + ' ' + (img.page_text || ''));
+        const idx = corpus.indexOf(phrase);
+        if (idx >= 0) hits.push({ img, idx });
+      }
+      if (hits.length === 0) continue;
+      // Among matches, prefer the image whose page_text contains the phrase
+      // earliest — title text usually appears near the top of the page, while
+      // cross-references and footnotes appear later or on other pages.
+      hits.sort((a, b) => a.idx - b.idx);
+      return hits[0].img;
+    }
+    return null;
+  }
 
   async function readSSE(response, onEvent) {
     const reader = response.body.getReader();
@@ -182,6 +236,7 @@
         }
       });
       if (ingestError) throw new Error(ingestError);
+      await fetchDocImages();
     } catch (err) {
       hideProgress();
       setUploadZoneVisible(true);
@@ -291,7 +346,19 @@
     let citeCounter = 0;
 
     const markdownHtml = marked.parse(text, { breaks: false, gfm: true });
-    const withCites = markdownHtml.replace(/\[[^\]]*Chunk\s+\d+[^\]]*\]/g, match => {
+    // Rewrite LLM-emitted `[Title](image:N)` links into real /image-viewer URLs.
+    // The model is instructed to use this scheme only for image chunks; if N
+    // doesn't map to an image chunk we drop the link and keep the title text.
+    const withImageLinks = markdownHtml.replace(
+      /<a href="image:(\d+)"([^>]*)>(.*?)<\/a>/g,
+      (match, posStr, attrs, inner) => {
+        const pos = parseInt(posStr);
+        const chunk = chunks.find(c => c.position === pos);
+        if (!chunk || chunk.chunk_type !== 'image') return inner;
+        return `<a class="img-title-link" href="/image-viewer?chunk=${encodeURIComponent(chunk.chunk_index)}" target="_blank" rel="noopener" data-chunk="${chunk.chunk_index}" data-type="image" title="Open image in new tab">${inner}</a>`;
+      }
+    );
+    const withCites = withImageLinks.replace(/\[[^\]]*Chunk\s+\d+[^\]]*\]/g, match => {
       const positions = [...match.matchAll(/Chunk\s+(\d+)/g)].map(m => parseInt(m[1]));
       if (!positions.length) return match;
       return positions.map(pos => {
@@ -301,13 +368,36 @@
         const num = citationMap.get(pos);
         const isImage = chunk.chunk_type === 'image';
         const cls = isImage ? 'cite-badge cite-image' : 'cite-badge';
-        const title = isImage ? 'Click to view image' : 'Click to open in document';
+        const title = isImage ? 'Open image in new tab' : 'Click to open in document';
         return `<span class="${cls}" data-chunk="${chunk.chunk_index}" data-text="${escapeHtml(chunk.text)}" data-type="${chunk.chunk_type || 'text'}" title="${title}">[${num}]</span>`;
       }).join('');
     });
 
     bubble.classList.add('rendered');
     bubble.innerHTML = withCites;
+
+    // Fuzzy-link painting/figure names: walk every <strong> in the answer; if
+    // its text matches the caption of any image chunk in the doc (not just the
+    // retrieved set), wrap it in a hyperlink to that image. This catches the
+    // case where the LLM bolds a painting title without the image:N markdown
+    // link AND the image chunk wasn't even in the top-k retrieval.
+    if (docImages.length > 0) {
+      bubble.querySelectorAll('strong').forEach(s => {
+        if (s.querySelector('a')) return;  // already a link inside
+        const match = matchImageByName(s.textContent, docImages);
+        if (!match) return;
+        const a = document.createElement('a');
+        a.href = `/image-viewer?chunk=${encodeURIComponent(match.chunk_index)}`;
+        a.target = '_blank';
+        a.rel = 'noopener';
+        a.className = 'img-title-link';
+        a.title = 'Open image in new tab';
+        a.dataset.chunk = match.chunk_index;
+        a.dataset.type = 'image';
+        while (s.firstChild) a.appendChild(s.firstChild);
+        s.appendChild(a);
+      });
+    }
 
     const unknownAnswer = text.trim().toLowerCase().startsWith("i don't know");
     if (citationMap.size === 0 || unknownAnswer) { scrollToBottom(); return; }
@@ -364,6 +454,7 @@
     await fetch('/doc', { method: 'DELETE' });
     currentDoc = null;
     conversationHistory = [];
+    docImages = [];
     $('doc-card').classList.remove('visible');
     setUploadZoneVisible(true);
     hideSidebarError();
@@ -382,6 +473,7 @@
         showDocCard(info.doc_id, info.chunk_count);
         setUploadZoneVisible(false);
         enableInput();
+        await fetchDocImages();
       }
     } catch (_) {}
   }
