@@ -71,10 +71,11 @@ Open **http://localhost:8000** in your browser.
 ## Usage
 
 1. Drag a PDF onto the sidebar or click to upload
-2. Wait for the ingestion progress bar to complete
-3. Type a question and press Enter or click →
-4. A live status line shows each RAG stage: *Embedding query… → Searching database… → Generating answer…*
-5. The answer streams in as rendered markdown; on completion, `[N]` citation badges are wired to source pills — text chunks open the PDF viewer (`§ Chunk N`, purple), image chunks open the image viewer (`🖼 Chunk N`, orange) with the caption and source page
+2. A modal asks whether to **Process images** (extract figures, caption with Gemini Vision, embed) or do a **Text only** ingest (faster — skips Vision entirely)
+3. Wait for the ingestion progress bar to complete
+4. Type a question and press Enter or click →
+5. A live status line shows each RAG stage: *Embedding query… → Searching database… → Generating answer…*
+6. The answer streams in as rendered markdown; on completion, `[N]` citation badges are wired to source pills — text chunks open the PDF viewer (`§ Chunk N`, purple), image chunks open the image viewer (`🖼 Chunk N`, orange). Painting/figure names mentioned inline in the answer become clickable hyperlinks that open the matching image even when its chunk wasn't in the retrieved set
 
 If the document doesn't contain enough information to answer, the system responds: *"I don't know."*
 
@@ -133,8 +134,14 @@ Logs write to both the console and `logs/app.log`. The file handler rotates at 5
 **PDF viewer with chunk highlighting**
 Clicking a citation pill opens a separate viewer page (`/viewer`) that renders the full document via PDF.js and highlights the cited chunk in yellow. The chunk's page number is stored in the database at ingest time (by scanning each PDF page with PyMuPDF and matching the chunk text), so the viewer navigates directly to the right page rather than scanning the whole document at query time.
 
-**Multimodal image retrieval**
-Images embedded in the PDF are extracted with PyMuPDF at ingest time, captioned with Gemini 2.5 Flash Vision (1-2 sentences each), and stored as image chunks alongside text chunks — the caption is what gets embedded and BM25-indexed, so a query like "show me the architecture diagram" can match an image via its caption. Filters drop tiny/decorative images (< 200 px or < 5 KB) so icons and dividers don't pollute retrieval. At answer time, image chunks are passed to Gemini 2.5 Flash as actual `Part.from_bytes` parts (not just their captions), so the model reasons over the picture itself. Image citations render as orange `🖼` pills that open a dedicated `/image-viewer` page showing the full image with its caption and source page.
+**Multimodal image retrieval (opt-in)**
+Images embedded in the PDF are extracted with PyMuPDF at ingest time, captioned with Gemini 2.5 Flash Vision (1-2 sentences each), and stored as image chunks alongside text chunks — the caption is what gets embedded and BM25-indexed, so a query like "show me the architecture diagram" can match an image via its caption. The user opts in or out at upload time via a modal: text-only ingest skips Vision entirely (fast); processing images takes longer but enables visual citations. Tiny/decorative images (< 200 px or < 5 KB) are dropped before captioning. A two-stage extractor handles both layouts: stage 1 takes raw embedded images for any page, stage 2 falls back to a full-page render for sparse-text pages where PyMuPDF reports no embedded images (scanned/full-bleed paintings). After captioning, any image whose Vision caption is `"blank"` or contains a verbose negation like *"contains only text"* is dropped — this keeps text-page renders out of the candidate set so they don't pollute retrieval. At answer time, image chunks are passed to Gemini 2.5 Flash as actual `Part.from_bytes` parts (not just their captions), so the model reasons over the picture itself. Image citations render as orange `🖼` pills that open a dedicated `/image-viewer` page showing the full image with its caption and source page.
+
+**Painting-name fuzzy linking in answers**
+The chat caches every image chunk's caption + adjacent-page text on doc load (`/doc/images`). After the answer renders, every `<strong>` phrase is substring-matched against that corpus — bold painting/figure names in the answer become clickable hyperlinks that open the matching image, even when the image chunk wasn't in the top-k retrieval and even when the LLM didn't follow the explicit `[Title](image:N)` format. Among multiple matches, the matcher picks the image whose page text contains the phrase earliest (title position vs cross-reference position). This makes "Show me Frodo" and "What's the Holy Family painting about?" work consistently across art catalogs and illustrated novels.
+
+**Vision call latency optimizations**
+Images are downsized to 1024 px on the longest side and re-encoded as JPEG quality-85 before being sent to Vision — Vision doesn't need full resolution to caption an image, and high-DPI page renders dominate the upload time. A semaphore caps concurrent Gemini calls (caption + embed) at 8: paradoxically faster overall than unlimited `asyncio.gather`, because it avoids 429s and the 2/4/8/16 s exponential-backoff retries that follow them.
 
 **Markdown rendering in answers**
 Gemini's responses use markdown — bold headings, bullet lists, inline code. Tokens stream into the bubble as they arrive and are re-rendered through marked.js on every token, so the answer appears progressively as formatted text rather than raw `**` syntax. On the `done` event, `renderFinalAnswer` re-parses the full text and replaces inline `[Chunk N]` references with interactive citation badges; this final pass runs once instead of per-token, so citations only become clickable when the answer is complete.
