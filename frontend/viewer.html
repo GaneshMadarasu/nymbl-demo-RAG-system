@@ -336,16 +336,27 @@
         // Scroll immediately — no text scanning needed.
         pd.wrap.scrollIntoView({ behavior: 'smooth', block: 'center' });
 
-        // Highlight the chunk across up to three pages:
-        //   page N-1 (prevPd) — in case the chunk started before the stored page
-        //   page N   (pd)     — the stored page; always highlighted
-        //   page N+1 (nextPd) — in case the chunk continues past the stored page
+        // Highlight the chunk across a 6-page window centred on the stored
+        // page (2 before + stored + 3 after). Forward-leaning because a chunk
+        // is more likely to spill into following pages than start before the
+        // page-finder's anchor.
+        //   pages N-2, N-1 → tryHighlightHead (chunk might have started here)
+        //   page  N        → tryHighlight (the stored page)
+        //   pages N+1..N+3 → tryHighlightTail (chunk might continue here)
         if (fullText) {
-          const prevPd = targetPg > 1 ? pageData[targetPg - 2] : null; // [targetPg-2] = page N-1
-          if (prevPd) await tryHighlightHead(prevPd.page, prevPd.vp, prevPd.scale, prevPd.overlay, fullText);
-          await tryHighlight(pd.page, pd.vp, pd.scale, pd.overlay, fullText);
-          const nextPd = pageData[targetPg]; // targetPg is 1-indexed; [targetPg] = page N+1
-          if (nextPd) await tryHighlightTail(nextPd.page, nextPd.vp, nextPd.scale, nextPd.overlay, fullText);
+          const HIGHLIGHT_BEFORE = 2;
+          const HIGHLIGHT_AFTER = 3;
+          for (let offset = -HIGHLIGHT_BEFORE; offset <= HIGHLIGHT_AFTER; offset++) {
+            const pgd = pageData[targetPg - 1 + offset]; // 0-indexed
+            if (!pgd) continue;
+            if (offset < 0) {
+              await tryHighlightHead(pgd.page, pgd.vp, pgd.scale, pgd.overlay, fullText);
+            } else if (offset > 0) {
+              await tryHighlightTail(pgd.page, pgd.vp, pgd.scale, pgd.overlay, fullText);
+            } else {
+              await tryHighlight(pgd.page, pgd.vp, pgd.scale, pgd.overlay, fullText);
+            }
+          }
         }
 
         const t = document.createElement('div');
