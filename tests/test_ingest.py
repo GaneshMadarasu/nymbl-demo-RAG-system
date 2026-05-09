@@ -52,6 +52,59 @@ async def test_run_ingest_done_event_has_chunk_count(pool):
     assert "k" in done
 
 
+def test_extract_text_captures_highlight_underline_and_freetext_annotations():
+    """Manual PDF markup (highlights, underlines, sticky notes, free-text
+    comments) is appended to the page's body text so the chunker / embedder
+    pick it up. Ink annotations are intentionally skipped (Path 3 future)."""
+    import fitz
+    from backend.ingest import _extract_text
+
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 100), "Project deadline is Friday this week.")
+    page.insert_text((72, 130), "Owner is Alex Kim.")
+    # Highlight overlaps the deadline text
+    page.add_highlight_annot(fitz.Rect(72, 92, 290, 110))
+    # Underline overlaps the owner text
+    page.add_underline_annot(fitz.Rect(72, 122, 200, 140))
+    # Sticky note (no underlying text — content is in the annotation itself)
+    page.add_text_annot(fitz.Point(400, 100), "review by EOQ")
+    # Free-text annotation
+    page.add_freetext_annot(fitz.Rect(72, 200, 300, 230), "ship blocker")
+    pdf_bytes = doc.write()
+    doc.close()
+
+    text, pages = _extract_text(pdf_bytes)
+    page_text = pages[0]
+
+    # Body text is preserved
+    assert "Project deadline is Friday" in page_text
+    assert "Owner is Alex Kim" in page_text
+    # Annotation summary appended
+    assert "[Annotations on this page:" in page_text
+    assert "[highlight:" in page_text
+    assert "[underlined:" in page_text
+    assert "[note: review by EOQ]" in page_text
+    assert "[note: ship blocker]" in page_text
+
+
+def test_extract_text_no_annotations_unchanged():
+    """Regression guard: PDFs without annotations produce the same body text
+    as before (no spurious annotation tag appended)."""
+    import fitz
+    from backend.ingest import _extract_text
+
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 72), "Plain typed body text with no markup.")
+    pdf_bytes = doc.write()
+    doc.close()
+
+    text, pages = _extract_text(pdf_bytes)
+    assert "Plain typed body text" in pages[0]
+    assert "Annotations on this page" not in pages[0]
+
+
 def test_render_page_produces_png_bytes():
     """Builds a minimal one-page PDF, then renders it via _render_page."""
     import fitz

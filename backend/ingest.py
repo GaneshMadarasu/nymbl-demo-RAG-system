@@ -151,18 +151,72 @@ def compute_params(total_tokens: int) -> tuple[int, int]:
         return 1024, 20
 
 
+_ANNOT_HIGHLIGHT_LIKE = {"Highlight", "Underline", "Squiggly", "StrikeOut"}
+_ANNOT_LABEL = {
+    "Highlight": "highlight",
+    "Underline": "underlined",
+    "Squiggly": "squiggly",
+    "StrikeOut": "strikethrough",
+}
+
+
+def _format_annotations(page) -> str:
+    """Read PDF annotation objects on the page (Highlight, Underline,
+    StrikeOut, FreeText, Text/sticky) and return a string summary suitable
+    for appending to the page's body text. Returns "" when there are none.
+
+    Each annotation enriches the chunk that contains it: a query like "what
+    did I underline?" can match the bracketed `[underlined: ...]` tag in
+    the chunk's parent_text, and the LLM has the underlying text in context."""
+    annots = page.annots()
+    if not annots:
+        return ""
+    parts: list[str] = []
+    for annot in annots:
+        atype = annot.type[1] if annot.type else ""
+        if atype in _ANNOT_HIGHLIGHT_LIKE:
+            try:
+                underlying = page.get_text("text", clip=annot.rect).strip()
+            except Exception:
+                underlying = ""
+            if underlying:
+                parts.append(f"[{_ANNOT_LABEL[atype]}: {underlying}]")
+        elif atype in ("FreeText", "Text"):
+            content = (annot.info.get("content") or "").strip()
+            if content:
+                parts.append(f"[note: {content}]")
+        # Ink (handwritten scribbles) carries no text content; recognising it
+        # would need Vision OCR on the rasterised stroke layer — see README
+        # "Future: scanned & flattened-ink annotations".
+    if not parts:
+        return ""
+    return "\n\n[Annotations on this page: " + " ".join(parts) + "]"
+
+
 def _extract_text(pdf_bytes: bytes) -> tuple[str, list[str]]:
-    """Returns (full_text, per_page_texts) where per_page_texts is 1-indexed (index 0 unused)."""
+    """Returns (full_text, per_page_texts) where per_page_texts is 1-indexed (index 0 unused).
+    Each page's text includes a trailing summary of any PDF annotations
+    (highlights, underlines, sticky notes, free-text comments) so manual
+    markup becomes searchable through the existing chunker / embedder."""
     t0 = time.monotonic()
     doc = fitz.open(stream=BytesIO(pdf_bytes), filetype="pdf")
-    pages = [page.get_text().replace("\x00", "") for page in doc]
+    pages: list[str] = []
+    annot_count = 0
+    for page in doc:
+        body = page.get_text().replace("\x00", "")
+        annot_summary = _format_annotations(page)
+        if annot_summary:
+            body = (body + annot_summary).strip()
+            annot_count += 1
+        pages.append(body)
     doc.close()
     text = "\n\n".join(p for p in pages if p.strip())
     logger.info(
-        "PyMuPDF extracted %d chars from %d pages in %.2fs",
+        "PyMuPDF extracted %d chars from %d pages in %.2fs (%d page(s) with annotations)",
         len(text),
         len(pages),
         time.monotonic() - t0,
+        annot_count,
     )
     return text, pages  # pages[0] = page 1 text, pages[1] = page 2 text, ...
 
