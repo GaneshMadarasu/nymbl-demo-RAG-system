@@ -21,9 +21,21 @@ logger = logging.getLogger(__name__)
 _client = genai.Client(api_key=settings.gemini_api_key)
 
 _EMBED_MODEL = "gemini-embedding-2"
+_VISION_MODEL = "gemini-2.5-flash"
 _EMBED_DIM = 768
 _MAX_RETRIES = 6
 _RETRY_BASE = 2.0  # delays: 2, 4, 8, 16, 32, 64s
+
+# Filter heuristics for image extraction
+_MIN_IMAGE_PX = 200  # skip images smaller than this in either dimension
+_MIN_IMAGE_BYTES = 5_000  # skip very small files (icons, dividers, decorative)
+_SUPPORTED_MIMES = {"image/png", "image/jpeg", "image/webp", "image/gif"}
+
+_CAPTION_PROMPT = (
+    "Describe this image from a PDF document in 1-2 concise sentences. "
+    "Begin by stating the type of image (chart, diagram, photo, screenshot, table, illustration). "
+    "Mention any visible text, axis labels, or data shown. Be specific and factual."
+)
 
 
 def _doc_id(pdf_bytes: bytes) -> str:
@@ -107,6 +119,80 @@ async def _embed_one(text: str) -> list[float]:
             raise
 
 
+def _extract_images(pdf_bytes: bytes) -> list[tuple[int, bytes, str]]:
+    """Extract images from a PDF. Returns list of (page_num, image_bytes, mime_type).
+    Filters out small/decorative images and unsupported formats."""
+    t0 = time.monotonic()
+    doc = fitz.open(stream=BytesIO(pdf_bytes), filetype="pdf")
+    images: list[tuple[int, bytes, str]] = []
+    seen: set[int] = set()  # dedupe by xref across pages
+    for page_num, page in enumerate(doc, 1):
+        for img in page.get_images(full=True):
+            xref = img[0]
+            if xref in seen:
+                continue
+            seen.add(xref)
+            try:
+                extracted = doc.extract_image(xref)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to extract image xref=%d on page %d: %s",
+                    xref,
+                    page_num,
+                    exc,
+                )
+                continue
+            img_bytes = extracted.get("image")
+            ext = (extracted.get("ext") or "").lower()
+            width = extracted.get("width", 0)
+            height = extracted.get("height", 0)
+            if not img_bytes:
+                continue
+            if width < _MIN_IMAGE_PX or height < _MIN_IMAGE_PX:
+                continue
+            if len(img_bytes) < _MIN_IMAGE_BYTES:
+                continue
+            mime = {
+                "png": "image/png",
+                "jpg": "image/jpeg",
+                "jpeg": "image/jpeg",
+                "gif": "image/gif",
+                "webp": "image/webp",
+            }.get(ext, f"image/{ext}")
+            if mime not in _SUPPORTED_MIMES:
+                continue
+            images.append((page_num, img_bytes, mime))
+    doc.close()
+    logger.info(
+        "PyMuPDF extracted %d filtered images in %.2fs",
+        len(images),
+        time.monotonic() - t0,
+    )
+    return images
+
+
+async def _caption_image(image_bytes: bytes, mime_type: str) -> str:
+    """Caption an image using Gemini Vision. Retries on retryable errors."""
+    for attempt in range(_MAX_RETRIES):
+        try:
+            r = await _client.aio.models.generate_content(
+                model=_VISION_MODEL,
+                contents=[
+                    types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
+                    _CAPTION_PROMPT,
+                ],
+            )
+            return (r.text or "image").strip()
+        except Exception as exc:
+            if attempt < _MAX_RETRIES - 1 and _is_retryable(exc):
+                wait = _RETRY_BASE**attempt
+                logger.warning("Captioning failed (%s); retrying in %.0fs", exc, wait)
+                await asyncio.sleep(wait)
+                continue
+            logger.warning("Captioning gave up after %d attempts: %s", attempt + 1, exc)
+            return "image"
+
+
 def _parent_texts(chunks: list[str]) -> list[str]:
     """Return adjacent-window text for each chunk (prev + self + next)."""
     result = []
@@ -171,12 +257,47 @@ async def run_ingest(pdf_bytes: bytes) -> AsyncGenerator[dict, None]:
         )
     ]
     await db.insert_chunks(pool, doc_id, rows)
+    text_chunk_count = total
+
+    yield {"status": "extracting_images", "message": "Extracting images from PDF…"}
+    images = await loop.run_in_executor(None, _extract_images, pdf_bytes)
+    image_chunk_count = 0
+    if images:
+        yield {
+            "status": "captioning",
+            "message": f"Captioning {len(images)} images…",
+        }
+        captions = list(
+            await asyncio.gather(*[_caption_image(b, m) for _, b, m in images])
+        )
+
+        yield {"status": "embedding_images", "message": "Embedding image captions…"}
+        img_embeddings = list(await asyncio.gather(*[_embed_one(c) for c in captions]))
+
+        image_rows = [
+            (
+                text_chunk_count + i,
+                captions[i],
+                None,
+                img_embeddings[i],
+                images[i][0],  # page number
+                images[i][1],  # image bytes
+                images[i][2],  # mime type
+            )
+            for i in range(len(images))
+        ]
+        await db.insert_image_chunks(pool, doc_id, image_rows)
+        image_chunk_count = len(images)
+        logger.info("Inserted %d image chunks", image_chunk_count)
+
+    total = text_chunk_count + image_chunk_count
     await db.upsert_doc_meta(pool, doc_id, total, k)
 
     yield {
         "status": "done",
         "doc_id": doc_id,
         "chunk_count": total,
+        "image_count": image_chunk_count,
         "k": k,
-        "message": f"Done — {total} chunks stored",
+        "message": f"Done — {text_chunk_count} text + {image_chunk_count} image chunks stored",
     }

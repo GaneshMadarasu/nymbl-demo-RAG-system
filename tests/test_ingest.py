@@ -20,6 +20,7 @@ async def test_run_ingest_yields_done_event(pool):
     with (
         patch("backend.ingest.db.get_pool", new_callable=AsyncMock, return_value=pool),
         patch("backend.ingest._extract_text", return_value=(fake_text, [])),
+        patch("backend.ingest._extract_images", return_value=[]),
         patch(
             "backend.ingest._embed_one",
             new_callable=AsyncMock,
@@ -36,6 +37,7 @@ async def test_run_ingest_done_event_has_chunk_count(pool):
     with (
         patch("backend.ingest.db.get_pool", new_callable=AsyncMock, return_value=pool),
         patch("backend.ingest._extract_text", return_value=(fake_text, [])),
+        patch("backend.ingest._extract_images", return_value=[]),
         patch(
             "backend.ingest._embed_one",
             new_callable=AsyncMock,

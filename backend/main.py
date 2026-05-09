@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 from backend import db, ingest, query
@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 FRONTEND = Path(__file__).parent.parent / "frontend" / "index.html"
 VIEWER = Path(__file__).parent.parent / "frontend" / "viewer.html"
+IMAGE_VIEWER = Path(__file__).parent.parent / "frontend" / "image-viewer.html"
 _PDF_PATH = Path(tempfile.gettempdir()) / "docrag_current.pdf"
 
 _state: dict = {"doc_id": None, "chunk_count": 0, "k": 8}
@@ -100,6 +101,46 @@ async def get_chunk(chunk_index: int) -> dict:
     if not result:
         raise HTTPException(status_code=404, detail=f"Chunk {chunk_index} not found.")
     return result
+
+
+@app.get("/image-viewer")
+async def serve_image_viewer() -> FileResponse:
+    return FileResponse(
+        IMAGE_VIEWER,
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+    )
+
+
+@app.get("/image/{chunk_index}")
+async def get_image(chunk_index: int) -> Response:
+    if not _state["doc_id"]:
+        raise HTTPException(status_code=404, detail="No document loaded.")
+    pool = await db.get_pool()
+    img = await db.get_chunk_image(pool, _state["doc_id"], chunk_index)
+    if not img:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Image for chunk {chunk_index} not found.",
+        )
+    return Response(content=img["image_data"], media_type=img["image_mime"])
+
+
+@app.get("/image/{chunk_index}/meta")
+async def get_image_meta(chunk_index: int) -> dict:
+    if not _state["doc_id"]:
+        raise HTTPException(status_code=404, detail="No document loaded.")
+    pool = await db.get_pool()
+    img = await db.get_chunk_image(pool, _state["doc_id"], chunk_index)
+    if not img:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Image for chunk {chunk_index} not found.",
+        )
+    return {
+        "caption": img["caption"],
+        "page_number": img["page_number"],
+        "mime": img["image_mime"],
+    }
 
 
 @app.get("/health")

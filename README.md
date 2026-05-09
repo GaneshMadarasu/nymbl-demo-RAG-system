@@ -6,15 +6,16 @@ Single-document RAG system built for the Nymbl technical assessment: upload a PD
 
 | Layer | Technology |
 |-------|-----------|
-| PDF extraction | PyMuPDF (`fitz`) |
-| Embeddings | `gemini-embedding-2` (768-dim) |
+| PDF extraction | PyMuPDF (`fitz`) — text + embedded images |
+| Image captioning | Gemini 2.5 Flash Vision (1-2 sentence captions per image at ingest) |
+| Embeddings | `gemini-embedding-2` (768-dim) — text chunks AND image captions share the same space |
 | Chunking | tiktoken-aware sentence-boundary splitter |
 | Retrieval | Hybrid search — pgvector HNSW (dense) + `tsvector` BM25 (sparse), fused via RRF |
 | Re-ranking | Removed — hybrid RRF retrieval quality made it redundant (see Design decisions) |
-| Answering | Gemini 2.5 Flash (streamed) |
-| Vector store | Postgres 16 + pgvector (HNSW) |
+| Answering | Gemini 2.5 Flash multimodal (text + image bytes streamed) |
+| Vector store | Postgres 16 + pgvector (HNSW); image bytes stored as `BYTEA` next to their captions |
 | Backend | FastAPI + asyncpg |
-| Frontend | Single-file HTML/CSS/JS + PDF viewer with chunk highlighting (Nymbl light-mode design) |
+| Frontend | Single-file HTML/CSS/JS + PDF viewer + image viewer with chunk highlighting (Nymbl light-mode design) |
 | Logging | Python `logging` — console + rotating file (`logs/app.log`, 5 MB × 3 backups) |
 
 ## Setup
@@ -73,7 +74,7 @@ Open **http://localhost:8000** in your browser.
 2. Wait for the ingestion progress bar to complete
 3. Type a question and press Enter or click →
 4. A live status line shows each RAG stage: *Embedding query… → Searching database… → Generating answer…*
-5. The answer streams in as rendered markdown; on completion, `[N]` citation badges are wired to `§ Chunk N` pills — hover for a text preview, click to open the PDF viewer with the chunk highlighted in yellow
+5. The answer streams in as rendered markdown; on completion, `[N]` citation badges are wired to source pills — text chunks open the PDF viewer (`§ Chunk N`, purple), image chunks open the image viewer (`🖼 Chunk N`, orange) with the caption and source page
 
 If the document doesn't contain enough information to answer, the system responds: *"I don't know."*
 
@@ -131,6 +132,9 @@ Logs write to both the console and `logs/app.log`. The file handler rotates at 5
 
 **PDF viewer with chunk highlighting**
 Clicking a citation pill opens a separate viewer page (`/viewer`) that renders the full document via PDF.js and highlights the cited chunk in yellow. The chunk's page number is stored in the database at ingest time (by scanning each PDF page with PyMuPDF and matching the chunk text), so the viewer navigates directly to the right page rather than scanning the whole document at query time.
+
+**Multimodal image retrieval**
+Images embedded in the PDF are extracted with PyMuPDF at ingest time, captioned with Gemini 2.5 Flash Vision (1-2 sentences each), and stored as image chunks alongside text chunks — the caption is what gets embedded and BM25-indexed, so a query like "show me the architecture diagram" can match an image via its caption. Filters drop tiny/decorative images (< 200 px or < 5 KB) so icons and dividers don't pollute retrieval. At answer time, image chunks are passed to Gemini 2.5 Flash as actual `Part.from_bytes` parts (not just their captions), so the model reasons over the picture itself. Image citations render as orange `🖼` pills that open a dedicated `/image-viewer` page showing the full image with its caption and source page.
 
 **Markdown rendering in answers**
 Gemini's responses use markdown — bold headings, bullet lists, inline code. Tokens stream into the bubble as they arrive and are re-rendered through marked.js on every token, so the answer appears progressively as formatted text rather than raw `**` syntax. On the `done` event, `renderFinalAnswer` re-parses the full text and replaces inline `[Chunk N]` references with interactive citation badges; this final pass runs once instead of per-token, so citations only become clickable when the answer is complete.

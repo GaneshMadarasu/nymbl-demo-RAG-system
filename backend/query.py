@@ -99,22 +99,53 @@ async def _rewrite_query(question: str, history: list[dict]) -> str:
 _CHUNK_REF_RE = re.compile(r"\[Chunk\s+\d+\]", re.I)
 
 
+def _history_section(history: list[dict]) -> str:
+    if not history:
+        return ""
+    history_text = "\n".join(
+        f"{m['role'].capitalize()}: {_CHUNK_REF_RE.sub('', m['content']).strip()}"
+        for m in history[-6:]
+    )
+    return f"\n\nConversation so far:\n{history_text}"
+
+
 def build_prompt(question: str, chunks: list[dict], history: list[dict]) -> str:
     # Use sequential 1-N labels so the model can't cite out-of-range DB indexes.
     context = "\n".join(
         f'[Chunk {i + 1}]: "{r.get("parent_text") or r["text"]}"'
         for i, r in enumerate(chunks)
     )
-    history_section = ""
-    if history:
-        # Strip [Chunk N] tags from history so the model doesn't re-cite chunks
-        # from prior turns that are no longer in the current retrieval context.
-        history_text = "\n".join(
-            f"{m['role'].capitalize()}: {_CHUNK_REF_RE.sub('', m['content']).strip()}"
-            for m in history[-6:]
-        )
-        history_section = f"\n\nConversation so far:\n{history_text}"
-    return f"{SYSTEM_PROMPT}{history_section}\n\nContext:\n{context}\n\nQuestion: {question}"
+    return f"{SYSTEM_PROMPT}{_history_section(history)}\n\nContext:\n{context}\n\nQuestion: {question}"
+
+
+def _build_multimodal_contents(
+    question: str,
+    chunks: list[dict],
+    history: list[dict],
+    images: dict[int, dict],
+) -> list:
+    """Build a Gemini contents list interleaving text and image parts.
+    `images` maps chunk_index → {image_data, image_mime, caption, page_number}.
+    Image parts are inserted right after their [Chunk N] caption so the model
+    sees the picture in context."""
+    parts: list = [f"{SYSTEM_PROMPT}{_history_section(history)}\n\nContext:"]
+    for i, c in enumerate(chunks):
+        label = i + 1
+        if c.get("chunk_type") == "image" and c["chunk_index"] in images:
+            img = images[c["chunk_index"]]
+            parts.append(
+                f'[Chunk {label}] (image, page {img["page_number"]}): "{img["caption"]}"'
+            )
+            parts.append(
+                types.Part.from_bytes(
+                    data=img["image_data"], mime_type=img["image_mime"]
+                )
+            )
+        else:
+            text = c.get("parent_text") or c["text"]
+            parts.append(f'[Chunk {label}]: "{text}"')
+    parts.append(f"\nQuestion: {question}")
+    return parts
 
 
 async def run_query(
@@ -158,6 +189,7 @@ async def run_query(
             {
                 "position": i + 1,  # matches [Chunk N] in the prompt (1-indexed)
                 "chunk_index": c["chunk_index"],
+                "chunk_type": c.get("chunk_type", "text"),
                 "text": c["text"],
                 "similarity": round(float(c["similarity"]), 3),
                 "rrf_score": round(float(c["rrf_score"]), 6),
@@ -167,12 +199,22 @@ async def run_query(
         ],
     }
 
-    prompt = build_prompt(question, raw_chunks, history)
+    # Fetch image bytes for any image chunks in the retrieved set.
+    images: dict[int, dict] = {}
+    for c in raw_chunks:
+        if c.get("chunk_type") == "image":
+            img = await db.get_chunk_image(pool, doc_id, c["chunk_index"])
+            if img:
+                images[c["chunk_index"]] = img
+    if images:
+        logger.info("Passing %d image(s) to Gemini for multimodal answer", len(images))
+
+    contents = _build_multimodal_contents(question, raw_chunks, history, images)
 
     t0 = time.monotonic()
     async for chunk in await _client.aio.models.generate_content_stream(
         model=_GEN_MODEL,
-        contents=prompt,
+        contents=contents,
     ):
         if chunk.text:
             yield {"type": "token", "text": chunk.text}

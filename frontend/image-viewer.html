@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DocRAG – Image Viewer</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0a0a14; color: #e2e8f0; font-family: system-ui, -apple-system, sans-serif; min-height: 100vh; display: flex; flex-direction: column; }
+    #header {
+      position: sticky; top: 0; z-index: 100;
+      background: #11112b; border-bottom: 1px solid #2a2a4a;
+      padding: 10px 16px; display: flex; align-items: center; gap: 8px; font-size: 13px;
+    }
+    .logo { color: #818cf8; font-weight: 700; letter-spacing: 2px; }
+    .sep  { color: #2a2a4a; font-size: 16px; }
+    .chunk-id { color: #e2e8f0; font-weight: 600; }
+    .hint { margin-left: auto; font-size: 11px; color: #64748b; }
+    #status { padding: 48px 20px; text-align: center; color: #64748b; font-size: 14px; }
+    #content { padding: 32px 20px; display: flex; flex-direction: column; align-items: center; gap: 16px; flex: 1; }
+    #img-wrap { background: #fff; border-radius: 4px; padding: 16px; box-shadow: 0 4px 24px rgba(0,0,0,.7); max-width: 100%; }
+    #img { display: block; max-width: 100%; height: auto; max-height: 70vh; }
+    #caption { max-width: 800px; padding: 12px 16px; background: #11112b; border: 1px solid #2a2a4a; border-radius: 8px; line-height: 1.6; font-size: 14px; color: #cbd5e1; }
+    .label { font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: #818cf8; margin-bottom: 6px; }
+    .page-info { font-size: 12px; color: #64748b; margin-top: 4px; }
+  </style>
+</head>
+<body>
+  <div id="header">
+    <span class="logo">DOCRAG</span>
+    <span class="sep">|</span>
+    <span class="chunk-id" id="chunk-id">Image Viewer</span>
+    <span class="hint">Image extracted from PDF</span>
+  </div>
+  <div id="status">Loading image…</div>
+  <div id="content" style="display:none">
+    <div id="img-wrap"><img id="img" alt="PDF image"></div>
+    <div id="caption">
+      <div class="label">Caption</div>
+      <div id="caption-text"></div>
+      <div class="page-info" id="page-info"></div>
+    </div>
+  </div>
+
+  <script>
+  const params   = new URLSearchParams(location.search);
+  const chunkIdx = params.get('chunk') || '';
+  const $ = id => document.getElementById(id);
+
+  if (!chunkIdx) {
+    $('status').textContent = 'No chunk specified.';
+  } else {
+    $('chunk-id').textContent = `Chunk ${chunkIdx}`;
+    (async () => {
+      try {
+        const metaRes = await fetch(`/image/${encodeURIComponent(chunkIdx)}/meta`);
+        if (!metaRes.ok) throw new Error('Image not found');
+        const meta = await metaRes.json();
+        $('img').src = `/image/${encodeURIComponent(chunkIdx)}`;
+        $('caption-text').textContent = meta.caption || '(no caption)';
+        $('page-info').textContent = meta.page_number ? `Page ${meta.page_number}` : '';
+        $('status').style.display = 'none';
+        $('content').style.display = 'flex';
+      } catch (err) {
+        $('status').textContent = `Error: ${err.message}`;
+      }
+    })();
+  }
+  </script>
+</body>
+</html>

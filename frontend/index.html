@@ -79,6 +79,10 @@
     .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .7s linear infinite; vertical-align: middle; }
     @keyframes spin { to { transform: rotate(360deg); } }
     .rag-status { font-size: 12px; color: var(--muted); font-style: italic; margin-left: 8px; vertical-align: middle; }
+    .pill.pill-image { background: rgba(217, 119, 6, .12); color: #d97706; }
+    .pill.pill-image:hover { background: rgba(217, 119, 6, .22); }
+    .cite-badge.cite-image { background: rgba(217, 119, 6, .12); color: #d97706; }
+    .cite-badge.cite-image:hover { background: rgba(217, 119, 6, .22); }
   </style>
 </head>
 <body>
@@ -271,7 +275,12 @@
     if (!el) return;
     const text  = el.getAttribute('data-text') || '';
     const chunk = el.getAttribute('data-chunk') || '';
-    window.open(`/viewer?chunk=${encodeURIComponent(chunk)}&text=${encodeURIComponent(text.slice(0, 300))}`, '_blank');
+    const type  = el.getAttribute('data-type') || 'text';
+    if (type === 'image') {
+      window.open(`/image-viewer?chunk=${encodeURIComponent(chunk)}`, '_blank');
+    } else {
+      window.open(`/viewer?chunk=${encodeURIComponent(chunk)}&text=${encodeURIComponent(text.slice(0, 300))}`, '_blank');
+    }
   });
 
   async function renderFinalAnswer(bubble, text, chunks) {
@@ -290,7 +299,10 @@
         if (!chunk) return '';   // position outside 1..k → hallucinated, suppress
         if (!citationMap.has(pos)) citationMap.set(pos, ++citeCounter);
         const num = citationMap.get(pos);
-        return `<span class="cite-badge" data-chunk="${chunk.chunk_index}" data-text="${escapeHtml(chunk.text)}" title="Click to open in document">[${num}]</span>`;
+        const isImage = chunk.chunk_type === 'image';
+        const cls = isImage ? 'cite-badge cite-image' : 'cite-badge';
+        const title = isImage ? 'Click to view image' : 'Click to open in document';
+        return `<span class="${cls}" data-chunk="${chunk.chunk_index}" data-text="${escapeHtml(chunk.text)}" data-type="${chunk.chunk_type || 'text'}" title="${title}">[${num}]</span>`;
       }).join('');
     });
 
@@ -321,7 +333,11 @@
       const cls = pct >= 75 ? 'sim-high' : pct >= 50 ? 'sim-mid' : 'sim-low';
       const sim = pct ? `<span class="pill-sim ${cls}">${pct}%</span>` : '';
       const tip = chunk.text ? `<span class="tooltip">${escapeHtml(chunk.text)}</span>` : '';
-      ref.innerHTML = `<span class="ref-num">[${num}]</span><div class="ref-body">${pageHeading}<span class="pill" data-chunk="${chunk.chunk_index}" data-text="${escapeHtml(chunk.text)}" title="Click to open in document">§ ${chunk.chunk_index}${sim}${tip}</span></div>`;
+      const isImage = chunk.chunk_type === 'image';
+      const pillCls = isImage ? 'pill pill-image' : 'pill';
+      const pillIcon = isImage ? '🖼' : '§';
+      const pillTitle = isImage ? 'Click to view image' : 'Click to open in document';
+      ref.innerHTML = `<span class="ref-num">[${num}]</span><div class="ref-body">${pageHeading}<span class="${pillCls}" data-chunk="${chunk.chunk_index}" data-text="${escapeHtml(chunk.text)}" data-type="${chunk.chunk_type || 'text'}" title="${pillTitle}">${pillIcon} ${chunk.chunk_index}${sim}${tip}</span></div>`;
       cites.appendChild(ref);
     });
 
