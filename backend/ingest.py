@@ -46,6 +46,9 @@ _CAPTION_JPEG_QUALITY = 85
 # vs unlimited gather() once you have ~30+ images.
 _GEMINI_CONCURRENCY = 8
 
+_OCR_PAGE_DPI = 200
+_OCR_EMPTY_PAGE_THRESHOLD = 50
+
 
 _BLANK_PHRASES = (
     "no meaningful visual",
@@ -201,6 +204,17 @@ async def _embed_one(text: str) -> list[float]:
                 await asyncio.sleep(wait)
                 continue
             raise
+
+
+def _render_page(pdf_bytes: bytes, page_num: int, dpi: int) -> tuple[bytes, str]:
+    """Render one PDF page to PNG bytes. page_num is 1-indexed."""
+    doc = fitz.open(stream=BytesIO(pdf_bytes), filetype="pdf")
+    try:
+        page = doc[page_num - 1]
+        pix = page.get_pixmap(dpi=dpi)
+        return pix.tobytes("png"), "image/png"
+    finally:
+        doc.close()
 
 
 def _extract_images(pdf_bytes: bytes) -> list[tuple[int, bytes, str]]:

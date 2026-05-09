@@ -49,3 +49,21 @@ async def test_run_ingest_done_event_has_chunk_count(pool):
     assert done["chunk_count"] > 0
     assert "doc_id" in done
     assert "k" in done
+
+
+def test_render_page_produces_png_bytes():
+    """Builds a minimal one-page PDF, then renders it via _render_page."""
+    import fitz
+    from backend.ingest import _render_page
+
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 72), "Hello OCR")
+    pdf_bytes = doc.write()
+    doc.close()
+
+    img_bytes, mime = _render_page(pdf_bytes, page_num=1, dpi=200)
+    assert mime == "image/png"
+    # PNG magic bytes
+    assert img_bytes.startswith(b"\x89PNG\r\n\x1a\n")
+    assert len(img_bytes) > 1000
