@@ -118,6 +118,43 @@
     return true;
   }
 
+  // Render translucent yellow rectangles for OCR'd lines whose text appears
+  // in the cited chunk. Returns true if at least one box was drawn.
+  function highlightOcrLines(lines, chunkText, ctx, vp, scale) {
+    if (!lines || !lines.length || !chunkText) return false;
+    const norm = s => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    const chunkN = norm(chunkText);
+    if (!chunkN) return false;
+
+    const canvasW = vp.width;
+    const canvasH = vp.height;
+    let drew = false;
+    ctx.fillStyle = 'rgba(255, 235, 0, 0.4)';
+    for (const line of lines) {
+      const lt = norm(line.text);
+      if (lt.length < 3) continue;          // skip noise
+      if (!chunkN.includes(lt)) continue;    // line not part of this chunk
+      const [ymin, xmin, ymax, xmax] = line.bbox;
+      // Coords are 0-1000 normalized; scale to canvas pixels.
+      const top = (ymin / 1000) * canvasH;
+      const left = (xmin / 1000) * canvasW;
+      const height = ((ymax - ymin) / 1000) * canvasH;
+      const width = ((xmax - xmin) / 1000) * canvasW;
+      ctx.fillRect(left, top, width, height);
+      drew = true;
+    }
+    return drew;
+  }
+
+  async function fetchOcrLines(pageNum) {
+    try {
+      const r = await fetch('/doc/ocr-lines/' + pageNum);
+      if (!r.ok) return [];
+      const body = await r.json();
+      return Array.isArray(body) ? body : [];
+    } catch { return []; }
+  }
+
   // Highlight chunk start on page N-1: search for the beginning of the chunk
   // and highlight from that position to the end of the page.
   // Handles cases where _find_chunk_page assigned page N+1 because the chunk
@@ -341,11 +378,35 @@
         //   page N   (pd)     — the stored page; always highlighted
         //   page N+1 (nextPd) — in case the chunk continues past the stored page
         if (fullText) {
-          const prevPd = targetPg > 1 ? pageData[targetPg - 2] : null; // [targetPg-2] = page N-1
-          if (prevPd) await tryHighlightHead(prevPd.page, prevPd.vp, prevPd.scale, prevPd.overlay, fullText);
-          await tryHighlight(pd.page, pd.vp, pd.scale, pd.overlay, fullText);
-          const nextPd = pageData[targetPg]; // targetPg is 1-indexed; [targetPg] = page N+1
-          if (nextPd) await tryHighlightTail(nextPd.page, nextPd.vp, nextPd.scale, nextPd.overlay, fullText);
+          const prevPd = targetPg > 1 ? pageData[targetPg - 2] : null;
+          const nextPd = pageData[targetPg];
+
+          // For each candidate page, try OCR-bbox overlay first; fall back
+          // to text-layer highlighting if the page wasn't OCR'd.
+          async function highlightOne(pgData, mode) {
+            if (!pgData) return;
+            const lines = await fetchOcrLines(pgData.n);
+            if (lines.length) {
+              const ctx = pgData.overlay.getContext('2d');
+              if (highlightOcrLines(lines, fullText, ctx, pgData.vp, pgData.scale)) {
+                return; // OCR overlay drew something — done for this page
+              }
+              // Lines exist but none matched the chunk → leave page un-highlighted
+              return;
+            }
+            // Typed page → existing text-layer highlight path
+            if (mode === 'head') {
+              await tryHighlightHead(pgData.page, pgData.vp, pgData.scale, pgData.overlay, fullText);
+            } else if (mode === 'tail') {
+              await tryHighlightTail(pgData.page, pgData.vp, pgData.scale, pgData.overlay, fullText);
+            } else {
+              await tryHighlight(pgData.page, pgData.vp, pgData.scale, pgData.overlay, fullText);
+            }
+          }
+
+          await highlightOne(prevPd, 'head');
+          await highlightOne(pd, 'main');
+          await highlightOne(nextPd, 'tail');
         }
 
         const t = document.createElement('div');
