@@ -72,7 +72,20 @@ Open **http://localhost:8000** in your browser.
 ## Usage
 
 1. Drag a PDF onto the sidebar or click to upload
-2. A modal asks whether to do a **Text** ingest or **+Images** (extract figures, caption with Gemini Vision, embed). Two independent checkboxes enrich the ingest further: **Hand Written?** runs Vision OCR on empty-text pages so handwritten / scanned content becomes searchable (cheap — often zero Vision calls on typed PDFs), and **Detect hand-drawn markup** runs a Vision pass on every text page to recognise hand-drawn underlines, highlights, circles, and margin notes baked into the page raster (one Vision call per page, slow on long PDFs — opt in deliberately). Citations on scanned pages navigate the viewer to the right page (no in-page highlight on scans, since there's no text layer to anchor to).
+2. A modal asks whether to do a **Text** ingest or **+Images** (extract figures, caption with Gemini Vision, embed). Two independent checkboxes enrich the ingest further: **Hand Written?** runs Vision OCR on empty-text pages so handwritten / scanned content becomes searchable (cheap — often zero Vision calls on typed PDFs), and **Detect hand-drawn markup** runs a Vision pass on every text page to recognise hand-drawn underlines, highlights, circles, and margin notes baked into the page raster (one Vision call per page, slow on long PDFs — opt in deliberately, with an optional page-range input to scope the scan). Citations on scanned pages navigate the viewer to the right page (no in-page highlight on scans, since there's no text layer to anchor to).
+
+   **Toggle guide** — match the upload toggles to the kind of PDF you have:
+
+   | PDF type | Hand Written? | Detect hand-drawn markup |
+   |---|:-:|:-:|
+   | Typed digital PDF, no markup | — | — |
+   | Typed digital PDF with hand-drawn underlines/highlights | — | ✓ |
+   | Pure scanned PDF (image-only, no text layer) | ✓ | ✓ if it has hand-drawn marks |
+   | Scanned PDF with embedded OCR text layer (Acrobat / Preview pre-OCR'd) | — | ✓ if it has hand-drawn marks |
+   | Pure handwritten notebook | ✓ | ✓ if it has underlines / highlights |
+   | Mixed digital + scanned pages | ✓ | ✓ if it has hand-drawn marks |
+
+   The only case that strictly needs **both** is the pure image-only scan: OCR fills in the missing text so chunks have content, and markup detection tags the hand-drawn marks. For a pure scan with a lot of handwritten markup, expect ~2 Vision calls per page (OCR + markup) — the page-range field on the markup toggle is the lever to keep wall time bounded.
 3. Wait for the ingestion progress bar to complete
 4. Type a question and press Enter or click →
 5. A live status line shows each RAG stage: *Embedding query… → Searching database… → Generating answer…*
