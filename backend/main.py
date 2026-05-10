@@ -179,6 +179,7 @@ async def ingest_pdf(
     process_images: bool = Form(True),
     ocr_scanned: bool = Form(False),
     detect_markup: bool = Form(False),
+    markup_pages: str = Form(""),
 ) -> StreamingResponse:
     if not (file.filename or "").lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
@@ -196,6 +197,7 @@ async def ingest_pdf(
                 process_images=process_images,
                 ocr_scanned=ocr_scanned,
                 detect_markup=detect_markup,
+                markup_pages=markup_pages or None,
             ):
                 if event.get("status") == "done":
                     _state["doc_id"] = event["doc_id"]

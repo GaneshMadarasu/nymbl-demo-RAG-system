@@ -178,6 +178,57 @@ def test_format_markup_summary_empty_for_no_items():
     assert _format_markup_summary([]) == ""
 
 
+def test_parse_page_ranges_handles_mix_of_singles_and_ranges():
+    from backend.ingest import _parse_page_ranges
+
+    assert _parse_page_ranges("1-3, 7, 10-12", total_pages=20) == {
+        1,
+        2,
+        3,
+        7,
+        10,
+        11,
+        12,
+    }
+    assert _parse_page_ranges(" 5 ", total_pages=10) == {5}
+    assert _parse_page_ranges("8-100", total_pages=20) == set(range(8, 21))  # clamp hi
+    assert _parse_page_ranges("0-3", total_pages=10) == {1, 2, 3}  # clamp lo
+    assert _parse_page_ranges("", total_pages=10) is None  # empty → no filter
+    assert _parse_page_ranges(None, total_pages=10) is None
+    assert (
+        _parse_page_ranges("garbage", total_pages=10) is None
+    )  # unparseable → no filter
+    assert _parse_page_ranges("99-150", total_pages=20) is None  # all out of range
+
+
+async def test_collect_visual_markup_respects_target_pages_filter():
+    """When `target_pages` is supplied, the markup pass scans only that
+    intersection with text-bearing pages."""
+    pages = [
+        "page one body text",
+        "page two body text",
+        "page three body text",
+        "",  # empty: never scanned regardless
+        "page five body text",
+    ]
+    captured: list[int] = []
+
+    async def fake_detect(_pdf, page_num):
+        captured.append(page_num)
+        return [{"type": "underline", "color": "red", "text": f"p{page_num}"}]
+
+    with patch(
+        "backend.ingest._detect_visual_markup_one_page", side_effect=fake_detect
+    ):
+        from backend.ingest import _collect_visual_markup
+
+        out = await _collect_visual_markup(b"fake-pdf", pages, target_pages={2, 5})
+
+    # Only pages 2 and 5 should have been scanned (page 4 has no text)
+    assert sorted(captured) == [2, 5]
+    assert set(out.keys()) == {2, 5}
+
+
 async def test_collect_visual_markup_runs_on_pages_with_text():
     """Pages with non-empty body text get the markup pass; empty pages don't."""
     pages = ["page one body text", "", "page three body text"]

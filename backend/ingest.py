@@ -45,6 +45,11 @@ _CAPTION_JPEG_QUALITY = 85
 # limits of gemini-embedding-2 / gemini-2.5-flash and reduces overall wall time
 # vs unlimited gather() once you have ~30+ images.
 _GEMINI_CONCURRENCY = 8
+# Visual-markup detection is much lighter than caption/OCR (no extracted-text
+# baggage in the prompt, and the Vision call returns a small JSON array). We
+# can run many more in flight without tripping Gemini Flash's RPM/TPM ceilings.
+# 32 cuts the wall time for an 800-page markup pass from ~15 min to ~3 min.
+_MARKUP_CONCURRENCY = 32
 
 _OCR_PAGE_DPI = 200
 _OCR_EMPTY_PAGE_THRESHOLD = 50
@@ -605,20 +610,57 @@ def _format_markup_summary(items: list[dict]) -> str:
     return "\n\n[Visual markup on this page: " + " ".join(parts) + "]"
 
 
+def _parse_page_ranges(s: str | None, total_pages: int) -> set[int] | None:
+    """Parse a string like "1-50, 100, 200-220" into a 1-indexed page set.
+    Returns None if the input is empty / unparseable (caller treats None as
+    "no filter"). Pages outside [1, total_pages] are clamped or dropped."""
+    if not s or not s.strip():
+        return None
+    pages: set[int] = set()
+    for part in s.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            try:
+                lo_s, hi_s = part.split("-", 1)
+                lo = max(1, int(lo_s.strip()))
+                hi = min(total_pages, int(hi_s.strip()))
+                if lo <= hi:
+                    pages.update(range(lo, hi + 1))
+            except ValueError:
+                continue
+        else:
+            try:
+                n = int(part)
+                if 1 <= n <= total_pages:
+                    pages.add(n)
+            except ValueError:
+                continue
+    return pages or None
+
+
 async def _collect_visual_markup(
-    pdf_bytes: bytes, pages: list[str]
+    pdf_bytes: bytes,
+    pages: list[str],
+    target_pages: set[int] | None = None,
 ) -> dict[int, list[dict]]:
-    """Run hand-drawn markup detection on every page that has body text. The
-    point of this pass is to catch markup BAKED INTO the page raster (Path 3),
-    so it's complementary to `_format_annotations`'s layered-annotation reader.
-    Pages with no body text are skipped — they go through OCR if requested."""
-    targets = [i + 1 for i, p in enumerate(pages) if p.strip()]
+    """Run hand-drawn markup detection on pages that have body text. When
+    `target_pages` is provided, restricts the scan to that 1-indexed page
+    set (intersected with text-bearing pages) — the lever users pull when
+    they know which pages they marked up. Uses `_MARKUP_CONCURRENCY` (higher
+    than the shared OCR/embed budget) because markup calls are lighter."""
+    text_pages = [i + 1 for i, p in enumerate(pages) if p.strip()]
+    if target_pages is not None:
+        targets = [n for n in text_pages if n in target_pages]
+    else:
+        targets = text_pages
     if not targets:
         return {}
     logger.info("Detecting visual markup on %d page(s)", len(targets))
     results = await _gather_bounded(
         [_detect_visual_markup_one_page(pdf_bytes, n) for n in targets],
-        _GEMINI_CONCURRENCY,
+        _MARKUP_CONCURRENCY,
     )
     out: dict[int, list[dict]] = {}
     for page_num, items in zip(targets, results):
@@ -706,6 +748,7 @@ async def run_ingest(
     process_images: bool = True,
     ocr_scanned: bool = False,
     detect_markup: bool = False,
+    markup_pages: str | None = None,
 ) -> AsyncGenerator[dict, None]:
     pool = await db.get_pool()
     doc_id = _doc_id(pdf_bytes)
@@ -746,13 +789,21 @@ async def run_ingest(
     # empty pages), markup detection is one Vision call per text page.
     # Gated on its own opt-in toggle so the user controls the cost.
     if detect_markup:
-        marked_pages = sum(1 for p in pages if p.strip())
-        if marked_pages:
+        target_pages = _parse_page_ranges(markup_pages, len(pages))
+        if target_pages is None:
+            scan_count = sum(1 for p in pages if p.strip())
+        else:
+            scan_count = sum(
+                1 for i, p in enumerate(pages) if p.strip() and (i + 1) in target_pages
+            )
+        if scan_count:
             yield {
                 "status": "markup",
-                "message": f"Scanning {marked_pages} page(s) for hand-drawn markup…",
+                "message": f"Scanning {scan_count} page(s) for hand-drawn markup…",
             }
-            markup_by_page = await _collect_visual_markup(pdf_bytes, pages)
+            markup_by_page = await _collect_visual_markup(
+                pdf_bytes, pages, target_pages=target_pages
+            )
             for page_num, items in markup_by_page.items():
                 summary = _format_markup_summary(items)
                 if summary:
