@@ -1,5 +1,7 @@
 # OCR for scanned/handwritten PDFs — implementation plan
 
+> **Status: Historical — superseded by current implementation.** This document records the implementation plan as written on **2026-05-09**. The shipped OCR feature **abandoned the bbox/structured-JSON output path** described here: the `ocr_lines` table is now explicitly DROPped in the migration (`backend/db.py:70`); `insert_ocr_lines` / `get_ocr_lines` helpers were never added; `GET /doc/ocr-lines/{page_num}` was never built; `_ocr_one_page` returns plain `str` (not `tuple[str, list[dict]]`); `_ocr_empty_pages` returns a 2-tuple, not 3-tuple. File:line anchors below are stale. For the current OCR design see [docs/ARCHITECTURE.md](../../ARCHITECTURE.md) and the "OCR via Gemini Vision" section of [README.md](../../../README.md). Preserved here as a record of the original implementation intent.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Spec:** `docs/superpowers/specs/2026-05-09-ocr-handwritten-pdfs-design.md`

@@ -1,8 +1,10 @@
 # RAG System Design
 
+> **Status: Historical — superseded by current implementation.** This document records the design as planned on **2026-05-06**. The shipped system has diverged in several areas (hybrid RRF retrieval was added; LLM re-ranking was added then removed; the `GET /ingest/status` polling endpoint was never built — `POST /ingest` returns SSE inline). For the current state see [README.md](../../../README.md), [docs/ARCHITECTURE.md](../../ARCHITECTURE.md), and [docs/API.md](../../API.md). Preserved here as a record of the original design intent.
+
 **Date:** 2026-05-06  
 **Project:** nymbl-demo-RAG-system  
-**Status:** Approved
+**Status:** Approved (historical)
 
 ---
 

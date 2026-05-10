@@ -1,7 +1,9 @@
 # OCR for scanned / handwritten PDFs — design
 
+> **Status: Historical — superseded by current implementation.** This document records the design as planned on **2026-05-09**. The shipped OCR feature **deliberately abandoned** the structured-bbox/JSON output path described here in favor of verbatim text only — the `ocr_lines` table, `insert_ocr_lines` / `get_ocr_lines` helpers, and the `GET /doc/ocr-lines/{page_num}` endpoint were never built (the spec's bbox payload added cost without UX value on a single-document demo). For the current OCR design see [docs/ARCHITECTURE.md](../../ARCHITECTURE.md) and the "OCR via Gemini Vision" section of [README.md](../../../README.md). Preserved here as a record of the original design intent.
+
 **Date:** 2026-05-09
-**Status:** Approved (pending user spec review)
+**Status:** Approved (historical) — partially implemented; bbox path abandoned
 **Scope:** Additive feature on top of the existing RAG pipeline. No removal or rework of current behavior.
 
 ## Goal

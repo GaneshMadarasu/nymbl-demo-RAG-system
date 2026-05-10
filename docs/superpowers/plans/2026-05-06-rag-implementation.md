@@ -1,5 +1,7 @@
 # RAG System Implementation Plan
 
+> **Status: Historical — superseded by current implementation.** This document records the implementation plan as written on **2026-05-06**. The shipped code has diverged: SDK migrated from `google-generativeai==0.8.3` to `google-genai==1.73.1`; embedding model upgraded `gemini-embedding-004` → `gemini-embedding-2`; generation/vision model upgraded `gemini-1.5-flash` → `gemini-2.5-flash`; retrieval `k` is now adaptive (5–20 via `compute_params`) instead of fixed at 5; the frontend is split into three HTML files (`index.html`, `viewer.html`, `image-viewer.html`) plus additional endpoints not in this plan. For the current state see [README.md](../../../README.md) and [docs/ARCHITECTURE.md](../../ARCHITECTURE.md). Preserved here as a record of the original implementation intent.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build a single-document RAG web app that ingests a PDF, stores chunks + embeddings in pgvector, and answers questions via a dark-indigo split-pane chat UI with inline citations.
