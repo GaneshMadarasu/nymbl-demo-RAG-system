@@ -23,7 +23,7 @@
     .progress-area { display: none; flex-direction: column; gap: 8px; }
     .progress-area.visible { display: flex; }
     .progress-bar { height: 4px; background: rgba(255,255,255,.15); border-radius: 2px; overflow: hidden; }
-    .progress-fill { height: 100%; background: #c4b5fd; border-radius: 2px; width: 0%; transition: width .3s; }
+    .progress-fill { height: 100%; background: #34d399; border-radius: 2px; width: 0%; transition: width .3s ease-out; }
     .progress-msg { font-size: 12px; color: rgba(255,255,255,.5); }
     .doc-card { display: none; background: #2d2370; border-radius: var(--radius); padding: 12px; }
     .doc-card.visible { display: block; }
@@ -294,21 +294,52 @@
       const res = await fetch('/ingest', { method: 'POST', body: formData });
       if (!res.ok) { const err = await res.json(); throw new Error(err.detail || 'Upload failed'); }
       let ingestError = null;
+      // Each backend yield carries a `status` naming the current stage. We
+      // map every known status to a target percentage so the green bar
+      // visibly advances as the pipeline moves through extract → markup →
+      // chunk → embed → image stages. Numbers are rough wall-time estimates,
+      // not exact — the bar's width transition smooths the jumps.
+      const STAGE_PCT = {
+        extracting: 8,
+        ocr: 18,
+        markup: 45,
+        chunking: 50,
+        clearing: 52,
+        embedding: 75,
+        extracting_images: 80,
+        captioning: 90,
+        embedding_images: 96,
+      };
       await readSSE(res, event => {
         if (event.status === 'error') {
           ingestError = event.error || event.message || 'Ingest failed';
         } else if (event.status === 'done') {
+          // Don't hide the bar here — it should stay visible (now at 100%)
+          // until `fetchDocImages` finishes and the input is actually enabled,
+          // so the user sees a continuous green-bar state from upload until
+          // the app can take questions.
+          showProgress(100, event.message);
           currentDoc = { name: file.name, chunkCount: event.chunk_count, docId: event.doc_id };
           showDocCard(file.name, event.chunk_count);
-          hideProgress();
-          enableInput();
         } else {
-          const pct = event.progress ? Math.round(event.progress * 100) : null;
+          // Prefer an explicit progress field if the backend ever supplies
+          // one (currently only `embedding` does, with 0). Otherwise fall
+          // back to the per-stage estimate so the bar moves on every event.
+          const explicit = (typeof event.progress === 'number') ? Math.round(event.progress * 100) : null;
+          const pct = explicit !== null ? explicit : (STAGE_PCT[event.status] ?? null);
           showProgress(pct, event.message);
         }
       });
       if (ingestError) throw new Error(ingestError);
+      // Image previews are fetched after the SSE stream finishes; the bar
+      // should reflect that work too so the user doesn't see a stalled 100%.
+      if (processImages) showProgress(100, 'Loading image previews…');
       await fetchDocImages();
+      enableInput();
+      showProgress(100, 'Ready to take questions');
+      // Brief pause at 100% / "Ready" so the completion is visible before
+      // the bar disappears and the chat input takes over.
+      setTimeout(hideProgress, 800);
     } catch (err) {
       hideProgress();
       setUploadZoneVisible(true);
